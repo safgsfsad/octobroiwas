@@ -140,6 +140,20 @@ export class ProfileRuntime {
     });
   }
 
+  /** Close every window without confirmation and exit the profile process. */
+  quitProfile(): void {
+    setTimeout(() => { this.logger.warn('profile.quit-deadline'); app.exit(0); }, 8000).unref();
+    for (const w of [...this.windows.values()]) {
+      try { w.confirmClose(false); } catch (err) { this.logger.warn('profile.quit-window', err); }
+    }
+    setTimeout(() => app.quit(), 300);
+  }
+
+  /** Hook for every tab WebContents (fingerprint emulation is attached here). */
+  onTabCreated(wc: WebContents): void {
+    void wc;
+  }
+
   private async shutdown(): Promise<void> {
     try {
       await this.controller.onProfileClosed();
@@ -155,7 +169,7 @@ export class ProfileRuntime {
 
   openWindow(urls: string[] = []): BrowserWindowController {
     const w = new BrowserWindowController(this, urls);
-    this.windows.set(w.chrome.webContents.id, w);
+    this.windows.set(w.chromeId, w);
     this.lastFocused = w;
     return w;
   }
@@ -165,7 +179,8 @@ export class ProfileRuntime {
   }
 
   onWindowClosed(w: BrowserWindowController, tabs: Array<{ url: string; title: string; pinned: boolean; group?: string }>): void {
-    this.windows.delete(w.chrome.webContents.id);
+    this.windows.delete(w.chromeId);
+    if (this.lastFocused === w) this.lastFocused = [...this.windows.values()][0] ?? null;
     if (this.windows.size === 0) {
       if (this.profile.restoreSession && !this.profile.deleteOnClose && this.dek) {
         try { this.data.session.save({ savedAt: new Date().toISOString(), tabs, activeIndex: 0 }); } catch (err) { this.logger.warn('session.save-failed', err); }
@@ -506,8 +521,10 @@ export class ProfileRuntime {
         if (typeof m.url === 'string') (this.lastFocused ?? this.openWindow()).newTab(m.url);
         break;
       case 'quit':
-        for (const w of [...this.windows.values()]) w.close();
-        setTimeout(() => app.quit(), 200);
+        // Closed from the launcher (STOP / close button / API): skip the
+        // "confirm close" overlay, save the session, flush and exit. A hard
+        // deadline guarantees the process really ends even if a page hangs.
+        this.quitProfile();
         break;
       default:
         break;
@@ -549,4 +566,12 @@ export function runProfileProcess(distDir: string, dataDir: string, lang: Lang, 
     });
   });
   app.on('window-all-closed', () => app.quit());
+  // Never show Electron's modal "Uncaught exception" box in a profile: it blocks
+  // the window from closing. Log it and keep the browser running instead.
+  process.on('uncaughtException', (err) => {
+    try { new Logger(new DataLayout(dataDir).logs, 'octobrowser-profiles').error('profile.uncaught', err); } catch { /* ignore */ }
+  });
+  process.on('unhandledRejection', (err) => {
+    try { new Logger(new DataLayout(dataDir).logs, 'octobrowser-profiles').warn('profile.unhandled-rejection', err); } catch { /* ignore */ }
+  });
 }

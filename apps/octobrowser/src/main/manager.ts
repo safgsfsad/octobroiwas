@@ -35,6 +35,9 @@ interface Child {
   proc: ChildProcess;
   channel: JsonLineChannel;
   ready: boolean;
+  startedAt: number;
+  stopping?: boolean;
+  killTimer?: NodeJS.Timeout;
 }
 
 /** Payload of `mgr:create`: name + kind, optionally a settings patch from the create dialog. */
@@ -160,6 +163,8 @@ export class Manager {
       ...p,
       running: this.children.has(p.id),
       ready: this.children.get(p.id)?.ready ?? false,
+      stopping: this.children.get(p.id)?.stopping ?? false,
+      startedAt: this.children.get(p.id)?.startedAt ?? 0,
       sealed: this.profiles.isVaultLocked(p.id),
       hasVault: this.profiles.hasVault(p.id),
       needsResealing: this.profiles.needsResealing(p.id),
@@ -239,7 +244,11 @@ export class Manager {
     const pipe = proc.stdio[CHANNEL_FD] as Duplex | null;
     if (!pipe) throw new Error('profile channel pipe missing');
     const channel = new JsonLineChannel(pipe, pipe);
-    const child: Child = { proc, channel, ready: false };
+    const child: Child = { proc, channel, ready: false, startedAt: Date.now() };
+    try {
+      const st = p.stats ?? { launches: 0, lastLaunchAt: '', worktimeSec: 0 };
+      this.profiles.update(p.id, { stats: { ...st, launches: st.launches + 1, lastLaunchAt: new Date().toISOString() } });
+    } catch (err) { this.ctx.logger.warn('profile.stats', err); }
     this.children.set(p.id, child);
     // The data key travels ONLY over the private pipe - never argv/env.
     channel.send({ t: 'init', key: this.ctx.keyring.getKey().toString('base64') });
@@ -248,8 +257,47 @@ export class Manager {
     this.ctx.logger.info('profile.spawned', { profile: p.id });
   }
 
+  /**
+   * Stop a running profile: ask it to quit (session is saved, no confirmation
+   * overlay); if it has not exited after 10 s - or `force` is set - kill it.
+   */
+  stop(id: string, force = false): boolean {
+    const c = this.children.get(id);
+    if (!c) return false;
+    if (force) {
+      this.ctx.logger.warn('profile.killed', { profile: id });
+      c.proc.kill();
+      return true;
+    }
+    if (!c.stopping) {
+      c.stopping = true;
+      c.channel.send({ t: 'quit', reason: 'user' });
+      c.killTimer = setTimeout(() => {
+        if (this.children.get(id) === c && c.proc.exitCode === null) {
+          this.ctx.logger.warn('profile.stop-timeout-killed', { profile: id });
+          c.proc.kill();
+        }
+      }, 10_000);
+      this.pushProfiles();
+    }
+    return true;
+  }
+
+  isRunning(id: string): boolean {
+    return this.children.has(id);
+  }
+
   private async onChildExit(id: string, code: number | null): Promise<void> {
+    const ended = this.children.get(id);
+    if (ended?.killTimer) clearTimeout(ended.killTimer);
     this.children.delete(id);
+    if (ended) {
+      try {
+        const cur = this.profiles.get(id);
+        const st = cur.stats ?? { launches: 0, lastLaunchAt: '', worktimeSec: 0 };
+        this.profiles.update(id, { stats: { ...st, worktimeSec: st.worktimeSec + Math.max(0, Math.round((Date.now() - ended.startedAt) / 1000)) } });
+      } catch { /* profile deleted meanwhile */ }
+    }
     this.ctx.logger.info('profile.exited', { profile: id, code });
     let p: Profile | undefined;
     try { p = this.profiles.get(id); } catch { /* deleted meanwhile */ }
@@ -522,7 +570,7 @@ export class Manager {
       this.pushProfiles();
       return true;
     });
-    handle('mgr:close-profile', L, (_e, id: string) => { this.children.get(id)?.channel.send({ t: 'quit', reason: 'user' }); return true; });
+    handle('mgr:close-profile', L, (_e, id: string, force?: boolean) => this.stop(String(id), force === true));
     handle('mgr:lock-all', L, async () => { await this.lockAll('manual'); return true; });
     handle('mgr:master-password', L, async (_e, action: 'set' | 'remove', current: string, next: string, repeat: string) => {
       const keyring = ctx.keyring;

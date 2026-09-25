@@ -69,8 +69,14 @@ class Tab {
     this.volume = volume;
   }
 
+  /**
+   * Live WebContents of the tab or null. NOTE: once a WebContents is destroyed
+   * (page called window.close(), renderer torn down, window closing) Electron
+   * returns `undefined` from view.webContents - never dereference it directly.
+   */
   get wc(): WebContents | null {
-    return this.view && !this.view.webContents.isDestroyed() ? this.view.webContents : null;
+    const wc = this.view?.webContents as WebContents | undefined;
+    return wc && !wc.isDestroyed() ? wc : null;
   }
 
   get sleeping(): boolean {
@@ -81,6 +87,8 @@ class Tab {
 export class BrowserWindowController {
   readonly win: BaseWindow;
   readonly chrome: WebContentsView;
+  /** Chrome WebContents id, captured at creation (view.webContents is undefined after destruction). */
+  readonly chromeId: number;
   private tabs: Tab[] = [];
   private activeId = 0;
   private splitId = 0;
@@ -116,6 +124,7 @@ export class BrowserWindowController {
         partition: 'octo-ui', // in-memory UI session, separate from the profile's web session
       },
     });
+    this.chromeId = this.chrome.webContents.id;
     this.chrome.setBackgroundColor(THEME.octobrowser.bg);
     trustWebContents(this.chrome.webContents);
     this.win.contentView.addChildView(this.chrome);
@@ -138,8 +147,9 @@ export class BrowserWindowController {
     this.win.on('close', (e) => {
       if (this.closeConfirmed) return;
       if (!rt.settings.load().ui.confirmOnQuit) return; // setting off: close straight away
+      if (!this.chromeWc) return; // UI gone: nothing can confirm - close now
       e.preventDefault();
-      this.chrome.webContents.send('ui:close-request', { tabs: this.tabs.length, restoreSession: rt.profile.restoreSession && !rt.profile.deleteOnClose });
+      this.chromeWc.send('ui:close-request', { tabs: this.tabs.length, restoreSession: rt.profile.restoreSession && !rt.profile.deleteOnClose });
     });
     this.win.on('resize', () => this.layoutViews());
     this.win.on('enter-full-screen', () => this.pushState());
@@ -147,8 +157,10 @@ export class BrowserWindowController {
     this.win.on('focus', () => rt.onWindowFocus(this));
     this.win.on('closed', () => {
       clearInterval(this.sleepTimer);
-      rt.onWindowClosed(this, this.snapshotTabs());
-      for (const t of this.tabs) t.view?.webContents.close();
+      try { rt.onWindowClosed(this, this.snapshotTabs()); } catch (err) { rt.logger.warn('window.closed-handler', { err: String(err) }); }
+      const tabs = this.tabs;
+      this.tabs = [];
+      for (const t of tabs) this.destroyView(t);
     });
 
     for (const u of initialUrls.length ? initialUrls : [rt.profile.homePage]) this.newTab(u, { active: true });
@@ -157,6 +169,31 @@ export class BrowserWindowController {
   }
 
   // ------------------------------------------------------------ tab basics
+
+  /** Chrome UI WebContents, or null once destroyed (window closing). */
+  private get chromeWc(): WebContents | null {
+    const wc = this.chrome.webContents as WebContents | undefined;
+    return wc && !wc.isDestroyed() ? wc : null;
+  }
+
+  /** Detach and close a tab's view safely (idempotent, never throws). */
+  private destroyView(t: Tab): void {
+    const view = t.view;
+    if (!view) return;
+    const wc = t.wc;
+    t.view = null; // first: the 'destroyed' listener must see this as intentional
+    try { if (!this.win.isDestroyed()) this.win.contentView.removeChildView(view); } catch { /* already detached */ }
+    try { wc?.close(); } catch { /* already gone */ }
+  }
+
+  /** A tab's WebContents died on its own (window.close() from the page, etc.). */
+  private onTabContentsDestroyed(t: Tab, view: WebContentsView): void {
+    if (t.view !== view) return; // intentional close/sleep - already handled
+    t.view = null;
+    if (this.win.isDestroyed()) return;
+    try { this.win.contentView.removeChildView(view); } catch { /* ignore */ }
+    if (this.tabs.includes(t)) this.closeTab(t.id);
+  }
 
   private get active(): Tab | undefined {
     return this.tabs.find((t) => t.id === this.activeId);
@@ -187,9 +224,9 @@ export class BrowserWindowController {
     return `--octo-cfg=${Buffer.from(JSON.stringify(cfg)).toString('base64')}`;
   }
 
-  private createView(t: Tab): void {
+  private createView(t: Tab, adopt?: WebContents): void {
     const s = this.rt.controller.privacy;
-    const view = new WebContentsView({
+    const view = adopt ? new WebContentsView({ webContents: adopt } as Electron.WebContentsViewConstructorOptions) : new WebContentsView({
       webPreferences: {
         preload: path.join(this.rt.distDir, 'preload-tab.js'),
         sandbox: true,
@@ -208,8 +245,14 @@ export class BrowserWindowController {
     view.setBackgroundColor('#ffffff');
     t.view = view;
     const wc = view.webContents;
-    tabContents.add(wc.id);
-    wc.once('destroyed', () => tabContents.delete(wc.id));
+    const wcId = wc.id;
+    tabContents.add(wcId);
+    wc.once('destroyed', () => {
+      tabContents.delete(wcId);
+      // Deferred: Electron is still inside the destroy sequence here.
+      setImmediate(() => this.onTabContentsDestroyed(t, view));
+    });
+    this.rt.onTabCreated?.(wc);
     wc.setWebRTCIPHandlingPolicy(s.webrtc);
     wc.setAudioMuted(t.muted || this.rt.profile.audio.muted);
     this.wireTab(t, wc);
@@ -271,14 +314,30 @@ export class BrowserWindowController {
     wc.on('render-process-gone', () => { t.crashed = true; update(); });
     wc.on('enter-html-full-screen', () => { this.fullscreenHtml = true; this.win.setFullScreen(true); this.pushState(); this.layoutViews(); });
     wc.on('leave-html-full-screen', () => { this.fullscreenHtml = false; this.win.setFullScreen(false); this.pushState(); this.layoutViews(); });
-    wc.on('found-in-page', (_e, r) => this.chrome.webContents.send('ui:found', { active: r.activeMatchOrdinal, total: r.matches }));
+    wc.on('found-in-page', (_e, r) => this.send('ui:found', { active: r.activeMatchOrdinal, total: r.matches }));
     wc.setWindowOpenHandler(({ url, disposition }) => {
       if (!/^(https?|octo):/.test(url)) return { action: 'deny' };
       // Pop-ups become tabs (no opener relationship => less cross-window tracking).
       if (disposition === 'new-window' && this.rt.controller.privacy.blockPopups && Date.now() - t.lastUserInput > 1500) {
         this.rt.logger.info('popup.blocked', { profile: this.rt.profile.id });
-        this.chrome.webContents.send('ui:toast', { key: 'toast.popupBlocked' });
+        this.send('ui:toast', { key: 'toast.popupBlocked' });
         return { action: 'deny' };
+      }
+      // Normal / standard profiles: real pop-ups with window.opener, exactly like a
+      // regular browser (OAuth "Sign in with Google", 3-D Secure payments, SSO...).
+      // Strict / Tor profiles: the pop-up opens as an unrelated tab (no opener).
+      const level = this.rt.profile.protection?.level;
+      const keepOpener = (level === 'normal' || level === 'standard') && disposition !== 'background-tab' && /^https?:/.test(url);
+      if (keepOpener) {
+        return {
+          action: 'allow',
+          createWindow: (options: Electron.BrowserWindowConstructorOptions & { webContents?: WebContents }) => {
+            const child = options.webContents;
+            if (!child) throw new Error('no child webContents');
+            tabContents.add(child.id); // before its first navigation is checked by hardening
+            return this.adoptTab(child, url, t.id);
+          },
+        };
       }
       this.newTab(url, { active: disposition !== 'background-tab', after: t.id });
       return { action: 'deny' };
@@ -295,11 +354,21 @@ export class BrowserWindowController {
     this.tabs.splice(idx > 0 ? idx : this.tabs.length, 0, t);
     if (!opts.sleeping) {
       this.createView(t);
-      void t.wc!.loadURL(this.rt.normalizeInput(url));
+      void t.wc?.loadURL(this.rt.normalizeInput(url)).catch(() => undefined);
     }
     if (opts.active !== false) this.activate(t.id);
     else { this.layoutViews(); this.pushState(); }
     return t.id;
+  }
+
+  /** Adopt a WebContents created by the page (window.open with opener) as a new active tab. */
+  private adoptTab(child: WebContents, url: string, after: number): WebContents {
+    const t = new Tab(url, this.rt.profile.audio.volume);
+    const idx = this.tabs.findIndex((x) => x.id === after) + 1;
+    this.tabs.splice(idx > 0 ? idx : this.tabs.length, 0, t);
+    this.createView(t, child);
+    this.activate(t.id);
+    return child;
   }
 
   activate(id: number): void {
@@ -309,7 +378,7 @@ export class BrowserWindowController {
     t.lastActive = Date.now();
     if (t.sleeping) {
       this.createView(t);
-      void t.wc!.loadURL(t.url);
+      void t.wc?.loadURL(t.url).catch(() => undefined);
     }
     this.layoutViews();
     this.pushState();
@@ -322,13 +391,10 @@ export class BrowserWindowController {
     const [t] = this.tabs.splice(i, 1);
     if (/^https?:/.test(t.url)) this.closedStack.push({ url: t.url, title: t.title });
     if (this.closedStack.length > 25) this.closedStack.shift();
-    if (t.view) {
-      this.win.contentView.removeChildView(t.view);
-      t.view.webContents.close();
-    }
+    this.destroyView(t);
     if (this.splitId === id) this.splitId = 0;
     if (this.tabs.length === 0) {
-      this.win.close();
+      if (!this.win.isDestroyed()) this.win.close();
       return;
     }
     if (this.activeId === id) this.activate(this.tabs[Math.min(i, this.tabs.length - 1)].id);
@@ -342,9 +408,7 @@ export class BrowserWindowController {
     for (const t of this.tabs) {
       if (t.sleeping || t.id === this.activeId || t.id === this.splitId || t.pinned || t.audible) continue;
       if (t.lastActive < limit) {
-        this.win.contentView.removeChildView(t.view!);
-        t.view!.webContents.close();
-        t.view = null;
+        this.destroyView(t);
         this.pushTab(t);
       }
     }
@@ -359,6 +423,7 @@ export class BrowserWindowController {
   }
 
   private layoutViews(): void {
+    if (this.win.isDestroyed()) return;
     const b = this.win.getContentBounds();
     this.chrome.setBounds({ x: 0, y: 0, width: b.width, height: b.height });
     const area: Rect = this.fullscreenHtml ? { x: 0, y: 0, width: b.width, height: b.height } : this.content;
@@ -417,16 +482,15 @@ export class BrowserWindowController {
   }
 
   pushState(): void {
-    if (this.chrome.webContents.isDestroyed()) return;
-    this.chrome.webContents.send('ui:state', { ...this.state(), ...this.rt.sharedState() });
+    this.chromeWc?.send('ui:state', { ...this.state(), ...this.rt.sharedState() });
   }
 
   private pushTab(t: Tab): void {
-    if (!this.chrome.webContents.isDestroyed()) this.chrome.webContents.send('ui:tab', this.tabState(t));
+    this.chromeWc?.send('ui:tab', this.tabState(t));
   }
 
   send(channel: string, payload: unknown): void {
-    if (!this.chrome.webContents.isDestroyed()) this.chrome.webContents.send(channel, payload);
+    this.chromeWc?.send(channel, payload);
   }
 
   countBlocked(wc: WebContents | null): void {
@@ -460,8 +524,10 @@ export class BrowserWindowController {
     if (!t) return;
     const url = this.rt.normalizeInput(input);
     if (t.sleeping) this.createView(t);
-    void t.wc!.loadURL(url);
-    t.wc!.focus();
+    const wc = t.wc;
+    if (!wc) return;
+    void wc.loadURL(url);
+    wc.focus();
   }
 
   tabAction(id: number, action: string, arg?: unknown): void {
@@ -487,9 +553,7 @@ export class BrowserWindowController {
       case 'reload': wc?.reload(); break;
       case 'sleep':
         if (id !== this.activeId && t.view) {
-          this.win.contentView.removeChildView(t.view);
-          t.view.webContents.close();
-          t.view = null;
+          this.destroyView(t);
           this.pushState();
         }
         break;
