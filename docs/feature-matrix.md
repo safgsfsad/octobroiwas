@@ -43,7 +43,7 @@ Stan weryfikacji: kod przechodzi `tsc` i 144 testy vitest, oba bundle budują si
 | 17 | UI OctoDetect z ekranem startowym (PL/EN) | ✅ | |
 | 17 | Ochrona klucza: DPAPI **albo** hasło główne | ✅ | wybór w kreatorze i w Ustawieniach; nieczytelny klucz jest kwarantannowany, nie blokuje startu |
 | — | Szyfrowanie i odzyskiwanie profilu 12-wyrazową frazą | ✅ | BIP-39 (`packages/core/src/mnemonic.ts`), fraza przy włączaniu szyfrowania, przy otwieraniu, eksporcie i imporcie profilu |
-| — | Interfejs czarno-biały, minimalistyczny, z ikonami | ✅ | wspólne tokeny w `packages/shell/renderer/shared.css`, brak barw znaczeniowych, odstępy `--gap`/`--gap-lg`; test `ui-contrast.test.ts` pilnuje kontrastu i monochromatu |
+| — | Interfejs w stylu zrzutów referencyjnych (Dolphin): grafit + niebieski akcent, tabela profili, przyciski START/STOP | ✅ | launcher i pasek przeglądarki: paleta znaczeniowa (niebieski / zielony OK / czerwony błąd / bursztynowy ostrzeżenie), każdy stan ma też ikonę lub napis; pozostałe ekrany monochromatyczne; test `ui-contrast.test.ts` pilnuje kontrastu i palety; zrzuty weryfikuje `tools/dev/ui-shots.mjs` (nakładanie się, przepełnienie, brak tłumaczeń) |
 | — | Pusty ekran startowy zamiast pustej listy profili | ✅ | przyciski „Przeglądanie prywatne” i „Nowy profil” na środku |
 | — | Przeglądanie prywatne (profil tymczasowy, jeden klik) | ✅ | poziom Ścisły, dane usuwane po zamknięciu; bez obietnic anonimowości |
 | — | Tworzenie profilu: zakładki + podsumowanie na żywo | ✅ | `mgr:create` przyjmuje nazwę, typ i poprawkę ustawień; test `profiles.test.ts` |
@@ -52,7 +52,7 @@ Stan weryfikacji: kod przechodzi `tsc` i 144 testy vitest, oba bundle budują si
 | — | Pasek zakładek | ✅ | `ui.showBookmarksBar`, menu i Ustawienia → Karty; test waliacji ustawień |
 | — | Zmiana folderu danych z kopią i restartem | ✅ | `mgr:pick-folder` + `mgr:move-data`, kopia przed zapisem `bootstrap.json`, stary folder bez zmian |
 | — | Cienkie paski przewijania, nie nachodzące na tekst | ✅ | 10 px, `scrollbar-width: thin`, `background-clip: content-box` w każdym arkuszu renderera |
-| — | Zamykanie okna: zapis sesji, okno „Zamykanie…”, wymuszenie zamknięcia | ✅ | przechwycenie zdarzenia `close`, `ui:close-request` / `ui:close-ok`; czerwony dopisek „(możliwa utrata danych)” jest jedynym udokumentowanym wyjątkiem od monochromatu |
+| — | Zamykanie okna: zapis sesji, okno „Zamykanie…”, wymuszenie zamknięcia | ✅ | przechwycenie zdarzenia `close`, `ui:close-request` / `ui:close-ok`; czerwony dopisek „(możliwa utrata danych)” jest wyróżniony na czerwono |
 | — | Windows Sandbox oznaczona jako wersja testowa + ostrzeżenie o VPN | ✅ | `describeIsolation()` dodaje wiersz ostrzegawczy przy aktywnym VPN; opisana naprawa (split tunnelling) |
 | — | Wyszukiwarka w pasku adresu (4 silniki, bez podpowiedzi sieciowych) | ✅ | `network.searchEngine`, `searchEngineQueryUrl()`; test waliacji ustawień |
 | — | Przełączniki z widocznym stanem (tekst + kształt) | ✅ | `toggle()` dopisuje „Włączone/Wyłączone”; włączony przełącznik ma ciemny wskaźnik na białym torze |

@@ -1,14 +1,15 @@
 /**
  * packages/shell/test/ui-contrast.test.ts
  *
- * Guards the "black and white only" UI language of the suite. The whole design
- * is documented as monochrome (README, docs/feature-matrix.md): meaning is
- * carried by icons, weight, borders and spacing, never by a colour alone.
+ * Guards the UI colour language of the suite. Shared screens are monochrome;
+ * the launcher and browser chrome use a small semantic palette (blue accent,
+ * green OK, red error, amber warning). Meaning is always also carried by an
+ * icon or a label, never by a colour alone.
  *
  * Two regressions are checked here, both of which really happened:
  *   1. `color: #fff` on a `background: #fff` button - the label was invisible
  *      (white text on a white pill), so "Launch" / "New profile" looked empty;
- *   2. a leftover brand hue (green/amber/rose) in one of the stylesheets.
+ *   2. a stray hue outside the documented palette in one of the stylesheets.
  *
  * The test parses the real stylesheets, resolves `var(--token)` from the
  * `:root` blocks (shared.css first, the file's own tokens win) and computes the
@@ -121,23 +122,35 @@ describe('renderer stylesheets', () => {
     expect(invisible, `invisible or unreadable labels:\n${invisible.join('\n')}`).toEqual([]);
   });
 
-  it('stays monochrome (no brand hues)', () => {
-    // The single documented exception: the destructive "force close (may lose data)"
-    // hint in the browser closing overlay, which the product owner asked to be red.
-    const ALLOWED = new Set(['#b91c1c']);
+  it('uses only the documented palette (no stray brand hues)', () => {
+    // The launcher and the browser chrome follow the Dolphin-style reference
+    // screenshots: graphite surfaces plus four semantic hue families - blue
+    // accent, green OK/START, red error/STOP and amber warning (the Linux OS
+    // glyph is amber too). Every other stylesheet stays black and white.
+    // Colour is never the only carrier of meaning: each state also has an
+    // icon or a label, which the contrast test above keeps readable.
+    const PALETTE_FILES = new Set(['apps/octobrowser/src/renderer/launcher.css', 'apps/octobrowser/src/renderer/browser.css']);
+    const FAMILIES: Array<[number, number]> = [[195, 232], [115, 150], [345, 360], [0, 12], [30, 52]];
+    const ALLOWED = new Set(['#b91c1c']); // "force close (may lose data)" hint
+    const hueOf = ([r, g, b]: [number, number, number]): number => {
+      const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+      const h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+      return (h * 60 + 360) % 360;
+    };
     const hues: string[] = [];
     for (const f of CSS_FILES) {
       const css = fs.readFileSync(f, 'utf8');
-      const rel = path.relative(repoRoot, f);
+      const rel = path.relative(repoRoot, f).split(path.sep).join('/');
       css.split('\n').forEach((line, i) => {
         for (const m of line.matchAll(/#[0-9a-fA-F]{6}\b/g)) {
           const c = hex(m[0])!;
-          if (Math.max(...c) - Math.min(...c) > 30 && !ALLOWED.has(m[0].toLowerCase())) {
-            hues.push(`${rel}:${i + 1} ${m[0]}  ${line.trim().slice(0, 70)}`);
-          }
+          if (Math.max(...c) - Math.min(...c) <= 30 || ALLOWED.has(m[0].toLowerCase())) continue;
+          const hue = hueOf(c);
+          if (PALETTE_FILES.has(rel) && FAMILIES.some(([a, b]) => hue >= a && hue <= b)) continue;
+          hues.push(`${rel}:${i + 1} ${m[0]} (hue ${Math.round(hue)})  ${line.trim().slice(0, 70)}`);
         }
       });
     }
-    expect(hues, `the documented design is black and white only:\n${hues.join('\n')}`).toEqual([]);
+    expect(hues, `colour outside the documented palette:\n${hues.join('\n')}`).toEqual([]);
   });
 });

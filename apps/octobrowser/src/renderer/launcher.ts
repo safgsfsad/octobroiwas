@@ -1,903 +1,171 @@
 /**
  * apps/octobrowser/src/renderer/launcher.ts
  *
- * Launcher / profile manager UI: profile cards and editor, pre-launch
- * isolation summary, 12-word profile encryption, import/export, security,
- * updates, settings, logs and backups, about + network connections.
+ * Launcher / profile manager UI. Layout (dark, like common antidetect
+ * browsers): icon rail on the left, folder column (profiles view), toolbar +
+ * table. Views: profiles, proxies, security, updates, settings, API, logs,
+ * about. Profile list / editor / proxies / dialogs live in launcher-*.ts.
  */
 import { api, clear } from '@octo/shell/renderer/bridge';
-import { applyI18n, h, setDicts, setLang, t, Dicts, getLang } from '@octo/shell/renderer/i18n-client';
+import { applyI18n, h, setDicts, setLang, t } from '@octo/shell/renderer/i18n-client';
 import { icon } from '@octo/shell/renderer/icons';
-import { phraseDisplay, phraseEntry } from '@octo/shell/renderer/phrase';
 import { keyProtectionPanel } from '@octo/shell/renderer/keypanel';
-
-// ------------------------------------------------------------------ types
-
-type Kind = 'personal' | 'work' | 'private' | 'testing' | 'temporary' | 'tor' | 'custom';
-interface Profile {
-  id: string; name: string; kind: Kind; color: string; createdAt: string; updatedAt: string;
-  protection: { level: 'standard' | 'strict' | 'tor'; overrides?: Record<string, unknown> };
-  network: { mode: 'system' | 'direct' | 'proxy'; proxyRules?: string; proxyBypass?: string; hasProxyCredentials?: boolean };
-  dns: { mode: 'inherit' | 'system' | 'doh'; dohTemplate: string };
-  sandbox: { mode: 'none' | 'restricted' | 'windows-sandbox'; clipboard: 'allow' | 'write-only' | 'block'; camera: boolean; microphone: boolean; externalDevices: boolean; shareDownloads: boolean };
-  audio: { muted: boolean; volume: number; outputDeviceId: string };
-  addons: string[]; encrypted: boolean; deleteOnClose: boolean; keepHistory: boolean; restoreSession: boolean; homePage: string;
-  theme: 'dark' | 'light';
-  // runtime info from the manager
-  running: boolean; sealed: boolean; hasVault: boolean; needsResealing: boolean; issues: Array<{ key: string; severity: string }>; hasProxyCredentials: boolean;
-}
-interface AddonInfo { id: string; name: string; description: { en: string; pl: string }; version: string; license: string; permissions: Array<{ en: string; pl: string }>; source: string; kind: string; status: string; integrity: { en: string; pl: string } }
-interface UpdateStatus {
-  configured: boolean; current: string; latest: string | null; available: boolean; severity?: string; changelog?: { en: string; pl: string };
-  components?: string[]; requiresRestart?: boolean; lastCheckAt?: string; lastResult?: string; error?: string;
-  downloading?: { done: number; total: number }; readyToInstall?: string; rollbackAvailable: string[];
-}
-interface Settings {
-  updates: { autoCheck: boolean; backgroundCheck: boolean; channel: 'stable' | 'beta' };
-  network: { publicIpLookup: boolean; autoRefresh: boolean; searchEngine: string; dns: { mode: 'system' | 'doh'; provider: string; customTemplate: string } };
-  security: { autoLockMinutes: number; secretStore: 'local' | 'credman' }; logs: { mode: 'standard' | 'diagnostic' };
-  ui: { verticalTabs: boolean; sleepTabsAfterMin: number; showStartupSplash: boolean; showBookmarksBar: boolean; confirmOnQuit: boolean; openLinksInBackground: boolean }; tor: { torBrowserPath: string }; offline: boolean;
-}
-interface Init {
-  lang: 'en' | 'pl'; dicts: Dicts; version: string; dataDir: string; addons: AddonInfo[]; kinds: Kind[];
-  windowsSandbox: boolean; torBrowser: boolean; settings: Settings; update: UpdateStatus; logMode: 'standard' | 'diagnostic'; filtersUpdatedAt: string | null;
-  keyringMode: 'os' | 'password' | null; keyringRequiresPassword: boolean; secretBackend: 'local' | 'credman'; credmanAvailable: boolean;
-}
-interface IsoItem { labelKey: string; value: string; state: 'allowed' | 'blocked' | 'limited' | 'info' }
-type View = 'profiles' | 'security' | 'updates' | 'settings' | 'logs' | 'about';
-
-let init: Init;
-let profiles: Profile[] = [];
-let view: View = 'profiles';
-
-const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const L = (o: { en: string; pl: string }) => o[getLang()] ?? o.en;
-const tv = (v: string) => (v.startsWith('t:') ? t(v.slice(2)) : v);
-
-// ------------------------------------------------------------------ helpers
-
-function toast(text: string, kind: 'ok' | 'err' | 'info' = 'info'): void {
-  const el = h('div', { class: `toast ${kind}`, text });
-  $('toasts').append(el);
-  setTimeout(() => el.remove(), 4500);
-}
-
-async function run<T>(p: Promise<T>, okKey?: string): Promise<T | undefined> {
-  try {
-    const r = await p;
-    if (okKey) toast(t(okKey), 'ok');
-    return r;
-  } catch (err) {
-    toast(String((err as Error).message ?? err), 'err');
-    return undefined;
-  }
-}
-
-function closeModal(): void {
-  $('modal').classList.add('hidden');
-  clear($('modalBox'));
-}
-
-function modal(title: string, build: (box: HTMLElement) => void, wide = false): void {
-  const box = $('modalBox');
-  clear(box);
-  box.className = `modal-box${wide ? ' wide' : ''}`;
-  const close = h('button', { class: 'icon-btn', title: t('common.close') }, icon('close', 16));
-  close.onclick = closeModal;
-  box.append(h('div', { class: 'modal-head' }, h('h2', { text: title }), close));
-  build(box);
-  $('modal').classList.remove('hidden');
-  (box.querySelector('input,select,button.primary') as HTMLElement | null)?.focus();
-}
-
-function field(labelKey: string, control: HTMLElement, hintKey?: string): HTMLElement {
-  return h('label', { class: 'field' }, h('span', { class: 'lbl', text: t(labelKey) }), control, hintKey ? h('span', { class: 'hint', text: t(hintKey) }) : null);
-}
-
-function select<T extends string>(value: T, options: Array<[T, string]>, onChange?: (v: T) => void): HTMLSelectElement {
-  const s = h('select', {});
-  for (const [v, label] of options) {
-    const o = h('option', { value: v, text: label });
-    if (v === value) o.selected = true;
-    s.append(o);
-  }
-  if (onChange) s.onchange = () => onChange(s.value as T);
-  return s;
-}
-
-function toggle(checked: boolean, labelKey: string, onChange?: (v: boolean) => void, disabled = false): HTMLElement {
-  const inp = h('input', { type: 'checkbox', checked, disabled });
-  // The state is written out as text as well, so it never depends on the switch shape alone.
-  const state = h('span', { class: 'sw-state', text: t(checked ? 'state.on' : 'state.off') });
-  if (onChange) inp.onchange = () => { onChange(inp.checked); state.textContent = t(inp.checked ? 'state.on' : 'state.off'); };
-  return h('label', { class: 'toggle' }, inp, h('span', { class: 'sw' }), h('span', { text: t(labelKey) }), state);
-}
+import { $, S, L, Init, Profile, SavedProxy, Settings, UpdateStatus, View, run, toast, closeModal, closePopup, confirmDialog, field, select, toggle, input, copyText } from './launcher-ui';
+import { renderProfiles, renderFolders } from './launcher-profiles';
+import { renderProxies } from './launcher-proxies';
 
 // ------------------------------------------------------------------ layout
 
 const NAV: Array<[View, string]> = [
-  ['profiles', 'users'], ['security', 'shield'], ['updates', 'refreshCircle'], ['settings', 'settings'], ['logs', 'file'], ['about', 'info'],
+  ['profiles', 'users'], ['proxies', 'proxy'], ['security', 'shield'], ['updates', 'refreshCircle'], ['api', 'api'], ['settings', 'settings'], ['logs', 'file'], ['about', 'info'],
 ];
+
+let init: Init;
 
 function renderNav(): void {
   const nav = $('nav');
   clear(nav);
   for (const [v, ic] of NAV) {
-    const b = h('button', { class: `nav-item${v === view ? ' active' : ''}` }, icon(ic, 18), h('span', { text: t(`launcher.nav.${v}`) }));
+    const b = h('button', { class: `rail-item${v === S.view ? ' active' : ''}`, title: t(`launcher.nav.${v}`), 'aria-label': t(`launcher.nav.${v}`), 'aria-current': v === S.view ? 'page' : undefined }, icon(ic, 21), h('span', { class: 'rail-lbl', text: t(`launcher.nav.${v}`) }));
     if (v === 'updates' && init.update.available) b.append(h('span', { class: 'dot-badge' }));
-    b.onclick = () => { view = v; render(); };
+    b.onclick = () => { S.view = v; render(); };
     nav.append(b);
   }
-  $('sideFoot').textContent = `v${init.version}`;
+  const foot = $('sideFoot');
+  clear(foot);
+  const lock = h('button', { class: 'rail-item', title: t('launcher.lockNow'), 'aria-label': t('launcher.lockNow') }, icon('lock', 20), h('span', { class: 'rail-lbl', text: t('ui.lock') }));
+  lock.onclick = () => void run(api.invoke('mgr:lock-all'), 'toast.saved');
+  const lang = h('button', { class: 'rail-lang', title: t('settings.language'), text: init.lang.toUpperCase() });
+  lang.onclick = () => { S.view = 'settings'; render(); };
+  foot.append(lock, lang, h('span', { class: 'ver', text: `v${init.version}` }));
 }
 
-function renderTop(): void {
-  const s = $('secStatus');
+function renderStatus(): void {
+  const s = $('statusbar');
   clear(s);
-  const attention = profiles.some((p) => p.needsResealing) || !init.update.configured;
+  const running = S.profiles.filter((p) => p.running).length;
+  const attention = S.profiles.some((p) => p.needsResealing) || !init.update.configured;
+  const apiCfg = init.settings.api;
   s.append(
-    h('span', { class: `pill ${attention ? 'warn' : 'ok'}` }, icon(attention ? 'shieldAlert' : 'shieldCheck', 14), ` ${t(attention ? 'status.attention' : 'status.protectionActive')}`),
-    h('span', { class: 'pill' }, icon('lock', 14), ` ${t('keyring.local')}`),
-    h('span', { class: 'pill' }, icon('folder', 14), ` ${init.dataDir}`),
+    h('span', { class: `sb-item ${attention ? 'warn' : ''}` }, icon(attention ? 'shieldAlert' : 'shieldCheck', 13), h('span', { text: t(attention ? 'status.attention' : 'status.protectionActive') })),
+    h('span', { class: 'sb-item' }, icon('users', 13), h('span', { text: t('ui.sb.profiles', { n: S.profiles.length, running }) })),
+    h('span', { class: 'sb-item' }, icon('proxy', 13), h('span', { text: t('ui.sb.proxies', { n: S.proxies.length }) })),
+    h('span', { class: `sb-item ${apiCfg.enabled ? 'on' : ''}` }, icon('api', 13), h('span', { text: apiCfg.enabled ? `API 127.0.0.1:${apiCfg.port}` : t('ui.sb.apiOff') })),
+    h('span', { class: 'grow' }),
+    h('span', { class: 'sb-item ell', title: init.dataDir }, icon('folder', 13), h('span', { class: 'ell', text: init.dataDir })),
+    h('span', { class: 'sb-item', text: `OctoBrowser ${init.version}` }),
   );
-  const lock = $('lockAll');
-  clear(lock);
-  lock.append(icon('lock', 15), ` ${t('launcher.lockNow')}`);
-  lock.onclick = () => void run(api.invoke('mgr:lock-all'));
 }
 
 function render(): void {
+  closePopup();
   renderNav();
-  renderTop();
+  renderStatus();
+  const side2 = $('side2');
+  side2.classList.toggle('hidden', S.view !== 'profiles');
+  if (S.view === 'profiles') renderFolders(side2);
   const v = $('view');
+  const scroll = v.scrollTop;
   clear(v);
-  switch (view) {
+  v.className = `view-${S.view}`;
+  switch (S.view) {
     case 'profiles': renderProfiles(v); break;
+    case 'proxies': renderProxies(v); break;
     case 'security': renderSecurity(v); break;
     case 'updates': renderUpdates(v); break;
     case 'settings': renderSettings(v); break;
+    case 'api': void renderApi(v); break;
     case 'logs': void renderLogs(v); break;
     case 'about': renderAbout(v); break;
   }
+  if (S.view === 'profiles' || S.view === 'proxies') v.scrollTop = scroll;
+}
+S.render = render;
+
+function pageHead(key: string): HTMLElement {
+  return h('div', { class: 'toolbar' }, h('h1', { text: t(key) }));
 }
 
-// ------------------------------------------------------------------ profiles
+// ------------------------------------------------------------------ API
 
-function renderProfiles(v: HTMLElement): void {
-  const head = h('div', { class: 'view-head' }, h('h1', { text: t('launcher.nav.profiles') }));
-  const add = h('button', { class: 'btn primary' }, icon('plus', 15), ` ${t('profile.new')}`);
-  add.onclick = newProfileDialog;
-  const imp = h('button', { class: 'btn' }, icon('import', 15), ` ${t('profile.import')}`);
-  imp.onclick = importDialog;
-  const detect = h('button', { class: 'btn' }, icon('fingerprint', 15), ` ${t('privacy.runDetect')}`);
-  detect.onclick = () => void run(api.invoke('mgr:launch-detect'));
-  const priv = h('button', { class: 'btn' }, icon('eyeOff', 15), ` ${t('profile.privateBrowsing')}`);
-  priv.title = t('profile.privateBrowsingHint');
-  priv.onclick = privateBrowsingDialog;
-  head.append(h('div', { class: 'row' }, detect, priv, imp, add));
-  v.append(head);
+interface ApiStatus { enabled: boolean; port: number; listening: boolean; token: string; error: string; baseUrl: string }
 
-  // No profiles yet: a centred starting point instead of an empty grid.
-  if (!profiles.length) {
-    const create = h('button', { class: 'btn primary' }, icon('plus', 16), ` ${t('profile.new')}`);
-    create.onclick = newProfileDialog;
-    const quick = h('button', { class: 'btn' }, icon('eyeOff', 16), ` ${t('profile.privateBrowsing')}`);
-    quick.onclick = privateBrowsingDialog;
-    v.append(h('div', { class: 'empty' },
-      h('div', { class: 'empty-icon' }, icon('shield', 46)),
-      h('h2', { text: t('profiles.empty.title') }),
-      h('p', { class: 'muted', text: t('profiles.empty.text') }),
-      h('div', { class: 'row' }, quick, create),
-    ));
-    return;
-  }
-
-  const grid = h('div', { class: 'cards' });
-  for (const p of profiles) grid.append(profileCard(p));
-  v.append(grid);
-}
-
-function profileCard(p: Profile): HTMLElement {
-  const card = h('article', { class: `card${p.running ? ' running' : ''}` });
-  card.style.setProperty('--pc', p.color);
-  const icons = h('div', { class: 'card-icons' });
-  const ic = (name: string, titleKey: string, cls = '') => icons.append(h('span', { class: `ci ${cls}`, title: t(titleKey) }, icon(name, 15)));
-  ic('shield', `level.${p.protection.level}`, p.protection.level === 'standard' ? '' : 'on');
-  if (p.encrypted) ic('lock', p.sealed ? 'profile.sealed' : 'profile.unsealed', 'on');
-  if (p.sandbox.mode !== 'none') ic('box', `iso.mode.${p.sandbox.mode}`, 'on');
-  if (p.network.mode === 'proxy') ic('network', 'net.mode.proxy', 'on');
-  if (p.kind === 'tor') ic('tor', 'profile.kind.tor', 'on');
-  if (p.deleteOnClose || p.kind === 'temporary') ic('trash', 'profile.deleteOnClose');
-
-  const launch = h('button', { class: 'btn primary' }, icon(p.running ? 'eye' : 'play', 15), ` ${t(p.running ? 'profile.focus' : 'profile.launch')}`);
-  launch.onclick = () => preLaunch(p);
-  const edit = h('button', { class: 'btn' }, icon('edit', 15));
-  edit.title = t('common.edit');
-  edit.onclick = () => editProfile(p);
-  const more = h('button', { class: 'btn' }, icon('menu', 15));
-  more.title = t('common.more');
-  more.onclick = () => profileActions(p);
-
-  card.append(
-    h('div', { class: 'card-top' }, h('span', { class: 'avatar', text: p.name.slice(0, 1).toUpperCase() }), h('div', { class: 'grow' }, h('b', { text: p.name }), h('div', { class: 'muted small', text: t(`profile.kindTag.${p.kind}`) })), p.running ? h('span', { class: 'live', text: t('profile.running') }) : null),
-    h('div', { class: 'chips' }, h('span', { class: 'chip', text: t(`level.${p.protection.level}`) }), h('span', { class: 'chip', text: t(`net.mode.${p.network.mode}`) })),
-    icons,
-  );
-  if (p.needsResealing) card.append(h('div', { class: 'warn-line small', text: t('profile.needsResealing') }));
-  const warn = p.issues.filter((i) => i.severity === 'warn');
-  if (warn.length) card.append(h('div', { class: 'warn-line small', text: t(warn[0].key) }));
-  card.append(h('div', { class: 'card-actions' }, launch, edit, more));
-  return card;
-}
-
-// ------------------------------------------------------ create profile
-
-/**
- * Values of the two built-in presets, mirrored from packages/core/src/privacy.ts.
- * The renderer bundle runs in the browser and cannot import the Node-only core
- * package, so the live summary reads them from here - keep them in sync.
- */
-const PRESET_VALUES: Record<'standard' | 'strict', Record<string, string>> = {
-  standard: { webrtc: 'default_public_interface_only', canvas: 'allow', webgl: 'allow', hardwareApis: 'allow' },
-  strict: { webrtc: 'disable_non_proxied_udp', canvas: 'block-readback', webgl: 'disabled', hardwareApis: 'normalize' },
-};
-
-/** Draft of the create dialog. Defaults mirror `defaultProfile(kind)` in core. */
-interface NpDraft {
-  name: string;
-  kind: Kind;
-  homePage: string;
-  level: 'standard' | 'strict' | 'tor';
-  overrides: Record<string, boolean | string>;
-  netMode: 'system' | 'direct' | 'proxy';
-  proxyRules: string;
-  proxyBypass: string;
-  proxyUser: string;
-  proxyPass: string;
-  dnsMode: 'inherit' | 'system' | 'doh';
-  sandboxMode: 'none' | 'restricted' | 'windows-sandbox';
-  theme: 'dark' | 'light';
-  clipboard: 'allow' | 'write-only' | 'block';
-  camera: boolean;
-  microphone: boolean;
-  externalDevices: boolean;
-  keepHistory: boolean;
-  restoreSession: boolean;
-  deleteOnClose: boolean;
-}
-
-function npDraft(kind: Kind): NpDraft {
-  return {
-    name: '',
-    kind,
-    homePage: '',
-    level: kind === 'tor' ? 'tor' : kind === 'private' || kind === 'temporary' ? 'strict' : 'standard',
-    overrides: {},
-    netMode: 'system',
-    proxyRules: '', proxyBypass: '', proxyUser: '', proxyPass: '',
-    dnsMode: 'inherit',
-    sandboxMode: kind === 'testing' || kind === 'private' ? 'restricted' : 'none',
-    theme: 'dark',
-    clipboard: kind === 'private' || kind === 'temporary' ? 'write-only' : 'allow',
-    camera: kind === 'personal' || kind === 'work',
-    microphone: kind === 'personal' || kind === 'work',
-    externalDevices: false,
-    keepHistory: kind === 'personal' || kind === 'work',
-    restoreSession: kind === 'personal' || kind === 'work',
-    deleteOnClose: kind === 'temporary',
+async function renderApi(v: HTMLElement): Promise<void> {
+  v.append(pageHead('launcher.nav.api'));
+  const st = await run(api.invoke<ApiStatus>('mgr:api-status'));
+  if (!st || S.view !== 'api') return;
+  const draw = (s: ApiStatus) => {
+    init.settings.api = { enabled: s.enabled, port: s.port };
+    clear(panel);
+    const port = input(String(s.port), { inputmode: 'numeric', maxlength: '5' });
+    const savePort = h('button', { class: 'btn', text: t('common.save') });
+    savePort.onclick = async () => { const r = await run(api.invoke<ApiStatus>('mgr:api-set', { port: Number(port.value) }), 'toast.saved'); if (r) draw(r); };
+    let shown = false;
+    const tok = h('code', { class: 'token', text: '•'.repeat(32) });
+    const show = h('button', { class: 'btn small' }, icon('eye', 14), h('span', { text: t('api.show') }));
+    show.onclick = () => { shown = !shown; tok.textContent = shown ? s.token : '•'.repeat(32); };
+    const copy = h('button', { class: 'btn small' }, icon('copy', 14), h('span', { text: t('api.copy') }));
+    copy.onclick = () => void copyText(s.token);
+    const regen = h('button', { class: 'btn small danger' }, icon('refreshCircle', 14), h('span', { text: t('api.regenerate') }));
+    regen.onclick = () => confirmDialog(t('api.regenerateConfirm'), async () => { const r = await api.invoke<ApiStatus>('mgr:api-token'); draw(r); return r; }, 'toast.saved');
+    const state = s.enabled ? (s.listening ? h('span', { class: 'pill ok' }, icon('check', 13), ` ${t('api.listening', { url: s.baseUrl })}`) : h('span', { class: 'pill warn' }, icon('alert', 13), ` ${s.error || t('api.notListening')}`)) : h('span', { class: 'pill', text: t('state.off') });
+    panel.append(
+      h('h2', {}, icon('api', 17), ` ${t('api.title')}`),
+      h('p', { class: 'muted', text: t('api.desc') }),
+      toggle(s.enabled, 'api.enable', async (on) => { const r = await run(api.invoke<ApiStatus>('mgr:api-set', { enabled: on })); if (r) draw(r); }),
+      h('div', { class: 'row' }, state),
+      h('div', { class: 'grid2' },
+        h('div', { class: 'field' }, h('span', { class: 'lbl', text: t('api.port') }), h('div', { class: 'row nowrap' }, port, savePort), h('span', { class: 'hint', text: t('api.portHint') })),
+        h('div', { class: 'field' }, h('span', { class: 'lbl', text: t('api.baseUrl') }), h('code', { text: s.baseUrl }))),
+      h('div', { class: 'field' }, h('span', { class: 'lbl', text: t('api.token') }), h('div', { class: 'row' }, tok, show, copy, regen), h('span', { class: 'hint', text: t('api.tokenHint') })),
+      h('p', { class: 'note', text: t('api.securityNote') }),
+    );
+    const ex = (title: string, code: string) => h('div', { class: 'api-ex' }, h('div', { class: 'row between' }, h('b', { text: title }), (() => { const c = h('button', { class: 'btn small' }, icon('copy', 13), h('span', { text: t('api.copy') })); c.onclick = () => void copyText(code); return c; })()), h('pre', { text: code }));
+    const B = s.baseUrl;
+    const H = `-H "Authorization: Bearer ${shown ? s.token : '<TOKEN>'}"`;
+    clear(examples);
+    examples.append(h('h2', {}, icon('file', 17), ` ${t('api.examples')}`),
+      ex(t('api.ex.list'), `curl ${H} ${B}/profiles`),
+      ex(t('api.ex.create'), `curl -X POST ${H} -H "Content-Type: application/json" \\\n  -d '{"name":"Shop 1","os":"windows11","proxy":{"mode":"new","text":"socks5://user:pass@1.2.3.4:1080"}}' \\\n  ${B}/profiles`),
+      ex(t('api.ex.start'), `curl -X POST ${H} -H "Content-Type: application/json" -d '{"debug":true}' ${B}/profiles/<ID>/start\n# -> {"status":"started","debugPort":51234,"wsEndpoint":"ws://127.0.0.1:51234/devtools/browser/..."}`),
+      ex(t('api.ex.puppeteer'), `const { wsEndpoint } = await (await fetch('${B}/profiles/<ID>/start', {\n  method: 'POST', headers: { Authorization: 'Bearer <TOKEN>', 'Content-Type': 'application/json' },\n  body: JSON.stringify({ debug: true }) })).json();\nconst browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });`),
+      ex(t('api.ex.stop'), `curl -X POST ${H} ${B}/profiles/<ID>/stop`),
+      ex(t('api.ex.proxy'), `curl -X POST ${H} -H "Content-Type: application/json" -d '{"text":"1.2.3.4:8080:user:pass"}' ${B}/proxies/check`));
+    const eps = h('div', { class: 'endpoints' });
+    for (const [m, path, key] of API_ENDPOINTS) eps.append(h('div', { class: 'ep' }, h('span', { class: `m m-${m.toLowerCase()}`, text: m }), h('code', { text: path }), h('span', { class: 'muted', text: t(key) })));
+    clear(ref);
+    ref.append(h('h2', {}, icon('menu', 17), ` ${t('api.reference')}`), eps);
   };
+  const panel = h('div', { class: 'panel' });
+  const examples = h('div', { class: 'panel' });
+  const ref = h('div', { class: 'panel' });
+  v.append(panel, examples, ref);
+  draw(st);
 }
 
-/** Effective value of a privacy setting: the user's override wins over the preset. */
-function npEffective(d: NpDraft, key: string): string {
-  const ov = d.overrides[key];
-  if (ov !== undefined) return typeof ov === 'boolean' ? (ov ? 'on' : 'off') : String(ov);
-  return PRESET_VALUES[d.level === 'strict' ? 'strict' : 'standard'][key] ?? '-';
-}
-
-/** The part of the draft that becomes the profile (sent to `mgr:create`). */
-function npPatch(d: NpDraft): Record<string, unknown> {
-  return {
-    name: d.name.trim(),
-    homePage: d.homePage || 'octo://newtab',
-    protection: { level: d.level, overrides: d.overrides },
-    network: { mode: d.netMode, proxyRules: d.proxyRules || undefined, proxyBypass: d.proxyBypass || undefined },
-    dns: { mode: d.dnsMode, dohTemplate: '' },
-    sandbox: {
-      mode: d.sandboxMode, clipboard: d.clipboard, camera: d.camera, microphone: d.microphone,
-      externalDevices: d.externalDevices,
-    },
-    keepHistory: d.keepHistory,
-    restoreSession: d.restoreSession,
-    deleteOnClose: d.deleteOnClose,
-    theme: d.theme,
-  };
-}
-
-/** Live summary on the right of the dialog - what the profile will really do. */
-function npSummary(d: NpDraft): HTMLElement {
-  const row = (k: string, v: string) => h('div', { class: 'np-kv' }, h('span', { class: 'k', text: k }), h('span', { class: 'v', text: v }));
-  const onOff = (v: boolean) => t(v ? 'state.on' : 'state.off');
-  return h('div', { class: 'np-summary' },
-    h('div', { class: 'np-summary-head' }, icon('fingerprint', 16), h('b', { text: t('profile.summary') })),
-    h('div', { class: 'np-badge' }, icon('check', 13), h('span', { text: t('profile.stable') })),
-    row(t('profile.name'), d.name.trim() || t('profile.namePh')),
-    row(t('profile.kind'), t(`profile.kindTag.${d.kind}`)),
-    row(t('privacy.level'), t(`level.${d.level}`)),
-    row(t('net.modeLabel'), t(`net.mode.${d.netMode}`)),
-    row(t('profile.theme'), t(`profile.theme.${d.theme}`)),
-    row(t('ov.webrtc'), t(`webrtc.${npEffective(d, 'webrtc')}`)),
-    row(t('ov.canvas'), t(`canvas.${npEffective(d, 'canvas')}`)),
-    row(t('ov.webgl'), t(`webgl.${npEffective(d, 'webgl')}`)),
-    row(t('ov.hardwareApis'), t(`hardware.${npEffective(d, 'hardwareApis')}`)),
-    row(t('iso.mode'), t(`iso.mode.${d.sandboxMode}`)),
-    row(t('profile.keepHistory'), onOff(d.keepHistory)),
-    row(t('ov.clearOnExit'), onOff(npEffective(d, 'clearOnExit') === 'on')),
-    row(t('profile.deleteOnClose'), onOff(d.deleteOnClose)),
-    h('p', { class: 'hint', text: t('profile.stableHint') }),
-  );
-}
-
-/** One "preset / on / off" (or enum) row of the protection tab. */
-function npOverrideRow(d: NpDraft, o: { key: string; type: 'bool' | 'enum'; values?: string[] }, redraw: () => void): HTMLElement {
-  const ov = d.overrides;
-  const cur = ov[o.key];
-  const label = t(`ov.${o.key}`);
-  let ctl: HTMLSelectElement;
-  if (o.type === 'bool') {
-    ctl = select<string>(cur === undefined ? 'preset' : cur ? 'on' : 'off', [['preset', t('edit.preset')], ['on', t('state.on')], ['off', t('state.off')]], (v) => {
-      if (v === 'preset') delete ov[o.key]; else ov[o.key] = v === 'on';
-      redraw();
-    });
-  } else {
-    ctl = select<string>(cur === undefined ? 'preset' : String(cur), [['preset', t('edit.preset')], ...o.values!.map((x) => [x, t(`${o.key === 'hardwareApis' ? 'hardware' : o.key}.${x}`)] as [string, string])], (v) => {
-      if (v === 'preset') delete ov[o.key]; else ov[o.key] = v;
-      redraw();
-    });
-  }
-  return h('div', { class: 'ov-row' }, h('span', { text: label }), ctl);
-}
-
-const NP_OVERRIDES: Array<{ key: string; type: 'bool' | 'enum'; values?: string[] }> = [
-  { key: 'blockAds', type: 'bool' }, { key: 'blockTrackers', type: 'bool' }, { key: 'httpsOnly', type: 'bool' },
-  { key: 'blockThirdPartyCookies', type: 'bool' }, { key: 'stripTrackingParams', type: 'bool' },
-  { key: 'webrtc', type: 'enum', values: ['default', 'default_public_interface_only', 'disable_non_proxied_udp'] },
-  { key: 'canvas', type: 'enum', values: ['allow', 'block-readback'] },
-  { key: 'webgl', type: 'enum', values: ['allow', 'disabled'] },
-  { key: 'hardwareApis', type: 'enum', values: ['allow', 'normalize'] },
-  { key: 'clearOnExit', type: 'bool' }, { key: 'blockPopups', type: 'bool' }, { key: 'blockAutoplay', type: 'bool' },
+const API_ENDPOINTS: Array<[string, string, string]> = [
+  ['GET', '/v1/health', 'api.ep.health'],
+  ['GET', '/v1/profiles', 'api.ep.list'],
+  ['POST', '/v1/profiles', 'api.ep.create'],
+  ['GET', '/v1/profiles/:id', 'api.ep.get'],
+  ['PATCH', '/v1/profiles/:id', 'api.ep.update'],
+  ['DELETE', '/v1/profiles/:id', 'api.ep.delete'],
+  ['POST', '/v1/profiles/:id/start', 'api.ep.start'],
+  ['POST', '/v1/profiles/:id/stop', 'api.ep.stop'],
+  ['POST', '/v1/profiles/:id/fingerprint', 'api.ep.fingerprint'],
+  ['PUT', '/v1/profiles/:id/proxy', 'api.ep.setProxy'],
+  ['POST', '/v1/profiles/:id/proxy/check', 'api.ep.checkProfileProxy'],
+  ['POST', '/v1/profiles/bulk', 'api.ep.bulk'],
+  ['GET', '/v1/proxies', 'api.ep.proxies'],
+  ['POST', '/v1/proxies', 'api.ep.addProxies'],
+  ['PATCH', '/v1/proxies/:id', 'api.ep.updateProxy'],
+  ['DELETE', '/v1/proxies/:id', 'api.ep.deleteProxy'],
+  ['POST', '/v1/proxies/:id/check', 'api.ep.checkProxy'],
+  ['POST', '/v1/proxies/parse', 'api.ep.parse'],
+  ['POST', '/v1/proxies/check', 'api.ep.checkRaw'],
+  ['POST', '/v1/fingerprints', 'api.ep.newFp'],
+  ['GET', '/v1/fingerprints/meta', 'api.ep.fpMeta'],
 ];
-
-function npGeneral(b: HTMLElement, d: NpDraft, kinds: Kind[], all: () => void, summary: () => void): void {
-  const name = h('input', { type: 'text', maxlength: '64', placeholder: t('profile.namePh') });
-  name.value = d.name;
-  name.oninput = () => { d.name = name.value; summary(); };
-  const kind = select<Kind>(d.kind, kinds.map((k) => [k, t(`profile.kind.${k}`)] as [Kind, string]), (v) => {
-    const keep = d.name;
-    Object.assign(d, npDraft(v), { name: keep });
-    all();
-  });
-  const desc = h('p', { class: 'hint', text: t(`profile.kindDesc.${d.kind}`) });
-  const home = h('input', { type: 'text', maxlength: '2048', placeholder: 'octo://newtab' });
-  home.value = d.homePage ?? '';
-  home.oninput = () => { d.homePage = home.value.trim(); summary(); };
-  const theme = select<'dark' | 'light'>(d.theme, [['dark', t('profile.theme.dark')], ['light', t('profile.theme.light')]], (v) => {
-    d.theme = v;
-    summary();
-  });
-  b.append(
-    field('profile.name', name), field('profile.kind', kind), desc,
-    field('profile.homePage', home, 'profile.homePageHint'),
-    field('profile.theme', theme, 'profile.themeHint'),
-    toggle(d.keepHistory, 'profile.keepHistory', (v) => { d.keepHistory = v; summary(); }),
-    toggle(d.restoreSession, 'profile.restoreSession', (v) => { d.restoreSession = v; summary(); }),
-    h('p', { class: 'hint', text: t('profile.historyNote') }),
-  );
-}
-
-function npProtection(b: HTMLElement, d: NpDraft, summary: () => void): void {
-  if (d.kind === 'tor') {
-    b.append(h('p', { class: 'info', text: t('edit.torFixed') }));
-    return;
-  }
-  const lvl = select<'standard' | 'strict'>(d.level === 'strict' ? 'strict' : 'standard', [['standard', t('level.standard')], ['strict', t('level.strict')]], (v) => {
-    d.level = v;
-    d.overrides = {};
-    summary();
-  });
-  b.append(field('privacy.level', lvl), h('p', { class: 'hint', text: t(`level.${d.level}.desc`) }));
-  const grid = h('div', { class: 'ov-grid' });
-  for (const o of NP_OVERRIDES) grid.append(npOverrideRow(d, o, summary));
-  b.append(h('h3', { text: t('edit.overrides') }), h('p', { class: 'hint', text: t('edit.overridesHint') }), grid);
-  b.append(h('p', { class: 'hint', text: t('privacy.consistentNote') }));
-}
-
-function npNetwork(b: HTMLElement, d: NpDraft, summary: () => void): void {
-  if (d.kind === 'tor') {
-    b.append(h('p', { class: 'info', text: t('net.torNotHere') }));
-    return;
-  }
-  const mode = select(d.netMode, [['system', t('net.mode.system')], ['direct', t('net.mode.direct')], ['proxy', t('net.mode.proxy')]], (v) => {
-    d.netMode = v;
-    summary();
-  });
-  b.append(field('net.modeLabel', mode));
-  if (d.netMode === 'proxy') {
-    const rules = h('input', { type: 'text', maxlength: '512', placeholder: 'socks5://127.0.0.1:9050' });
-    rules.value = d.proxyRules;
-    rules.oninput = () => { d.proxyRules = rules.value.trim(); summary(); };
-    const bypass = h('input', { type: 'text', maxlength: '512', placeholder: '<local>' });
-    bypass.value = d.proxyBypass;
-    bypass.oninput = () => { d.proxyBypass = bypass.value.trim(); };
-    const user = h('input', { type: 'text', maxlength: '256', autocomplete: 'off' });
-    user.value = d.proxyUser;
-    user.oninput = () => { d.proxyUser = user.value; };
-    const pass = h('input', { type: 'password', maxlength: '256', autocomplete: 'new-password' });
-    pass.oninput = () => { d.proxyPass = pass.value; };
-    b.append(
-      field('net.proxyRules', rules, 'net.proxyRulesHint'), field('net.proxyBypass', bypass),
-      field('net.proxyUser', user), field('net.proxyPass', pass, 'net.credsHint'),
-    );
-  }
-  const dns = select(d.dnsMode, [['inherit', t('dns.inherit')], ['system', t('dns.system')], ['doh', t('dns.doh')]], (v) => { d.dnsMode = v; summary(); });
-  b.append(field('dns.label', dns));
-  if (d.dnsMode === 'doh') {
-    const tpl = h('input', { type: 'text', maxlength: '512', placeholder: 'https://dns.quad9.net/dns-query' });
-    b.append(field('dns.template', tpl, 'dns.templateHint'));
-  }
-  b.append(h('p', { class: 'hint', text: t('net.vpnNote') }));
-}
-
-function npIsolation(b: HTMLElement, d: NpDraft, summary: () => void): void {
-  const mode = select(d.sandboxMode, [['none', t('iso.mode.none')], ['restricted', t('iso.mode.restricted')], ['windows-sandbox', `${t('iso.mode.windows-sandbox')} (${t('sandbox.testVersion')})`]], (v) => {
-    d.sandboxMode = v;
-    summary();
-  });
-  const clip = select(d.clipboard, [['allow', t('iso.clipboard.allow')], ['write-only', t('iso.clipboard.write-only')], ['block', t('iso.clipboard.block')]], (v) => {
-    d.clipboard = v;
-    summary();
-  });
-  b.append(
-    field('iso.mode', mode, init.windowsSandbox ? 'sandbox.hint' : 'sandbox.hintNoWsb'),
-    field('iso.clipboard', clip),
-    toggle(d.camera, 'sandbox.camera', (v) => { d.camera = v; summary(); }),
-    toggle(d.microphone, 'sandbox.microphone', (v) => { d.microphone = v; summary(); }),
-    toggle(d.externalDevices, 'sandbox.devices', (v) => { d.externalDevices = v; summary(); }),
-    h('p', { class: 'hint', text: t('sandbox.appContainerNote') }),
-  );
-}
-
-/**
- * Create dialog: tabs on the left, a live summary of what the profile will
- * really do on the right. Values are descriptive and stable - the dialog never
- * offers to spoof hardware, randomise a fingerprint or hide the browser.
- */
-function newProfileDialog(): void {
-  const kinds = init.kinds.filter((k) => k !== 'tor' || !profiles.some((p) => p.kind === 'tor'));
-  const d = npDraft('custom');
-  let tab: 'general' | 'protection' | 'network' | 'isolation' = 'general';
-  modal(t('profile.new'), (box) => {
-    const tabs = h('div', { class: 'tabs' });
-    const left = h('div', { class: 'np-left' });
-    const right = h('div', { class: 'np-right' });
-    const summary = () => { clear(right); right.append(npSummary(d)); };
-    const all = () => { draw(); summary(); };
-    const draw = () => {
-      clear(tabs);
-      const TABS: Array<['general' | 'protection' | 'network' | 'isolation', string]> = [
-        ['general', 'edit.tab.general'], ['protection', 'edit.tab.privacy'], ['network', 'edit.tab.network'], ['isolation', 'edit.tab.sandbox'],
-      ];
-      for (const [k, key] of TABS) {
-        const b = h('button', { class: k === tab ? 'on' : '', text: t(key) });
-        b.onclick = () => { tab = k; draw(); };
-        tabs.append(b);
-      }
-      clear(left);
-      if (tab === 'general') npGeneral(left, d, kinds, all, summary);
-      if (tab === 'protection') npProtection(left, d, summary);
-      if (tab === 'network') npNetwork(left, d, summary);
-      if (tab === 'isolation') npIsolation(left, d, summary);
-    };
-    const cancel = h('button', { class: 'btn', text: t('common.cancel') });
-    cancel.onclick = closeModal;
-    const create = h('button', { class: 'btn primary' }, icon('check', 15), ` ${t('common.create')}`);
-    create.onclick = async () => {
-      const p = await run(api.invoke<Profile>('mgr:create', { name: d.name.trim() || t(`profile.kindTag.${d.kind}`), kind: d.kind, patch: npPatch(d) }));
-      if (!p) return;
-      if (d.proxyUser || d.proxyPass) await run(api.invoke('mgr:update', p.id, { proxyUsername: d.proxyUser, proxyPassword: d.proxyPass }));
-      closeModal();
-      toast(t('toast.profileCreated'), 'ok');
-    };
-    box.append(
-      h('p', { class: 'np-banner' }, icon('shieldCheck', 15), h('span', { text: t('profile.newBanner') })),
-      tabs, h('div', { class: 'np-body' }, left, right),
-      h('div', { class: 'np-actions' }, h('span', { class: 'grow' }), cancel, create),
-    );
-    draw();
-    summary();
-  }, true);
-  $('modalBox').classList.add('xwide');
-}
-
-/** Private browsing: one throw-away temporary profile, started right away. */
-function privateBrowsingDialog(): void {
-  modal(t('profile.privateTitle'), (box) => {
-    const cancel = h('button', { class: 'btn', text: t('common.cancel') });
-    cancel.onclick = closeModal;
-    const start = h('button', { class: 'btn primary' }, icon('eyeOff', 15), ` ${t('profile.privateStart')}`);
-    start.onclick = async () => {
-      const r = await run(api.invoke<{ status: string }>('mgr:private-browse'));
-      if (!r) return;
-      closeModal();
-      toast(t('profile.privateToast'), 'ok');
-    };
-    box.append(
-      h('p', { text: t('profile.privateBody') }),
-      h('p', { class: 'note small', text: t('profile.privateNote') }),
-      h('div', { class: 'modal-actions' }, cancel, start),
-    );
-  });
-}
-
-function profileActions(p: Profile): void {
-  modal(p.name, (box) => {
-    const act = (ic: string, key: string, fn: () => void, danger = false) => {
-      const b = h('button', { class: `menu-item${danger ? ' danger' : ''}` }, icon(ic, 16), ` ${t(key)}`);
-      b.onclick = fn;
-      box.append(b);
-    };
-    if (p.running) act('stop', 'profile.close', () => void run(api.invoke('mgr:close-profile', p.id)).then(closeModal));
-    act('copy', 'profile.duplicate', () => duplicateDialog(p));
-    act('export', 'profile.export', () => void exportDialog(p));
-    act(p.encrypted ? 'unlock' : 'lock', p.encrypted ? 'profile.disableEncryption' : 'profile.enableEncryption', () => encryptionDialog(p));
-    if (p.needsResealing) act('lock', 'profile.reseal', () => resealDialog(p));
-    act('refreshCircle', 'profile.reset', () => confirmDialog(t('profile.resetConfirm', { name: p.name }), () => api.invoke('mgr:reset', p.id), 'toast.profileReset'), true);
-    act('trash', 'profile.delete', () => confirmDialog(t('profile.deleteConfirm', { name: p.name }), () => api.invoke('mgr:remove', p.id), 'toast.profileDeleted'), true);
-  });
-}
-
-function confirmDialog(text: string, fn: () => Promise<unknown>, okKey: string): void {
-  modal(t('common.confirm'), (box) => {
-    const ok = h('button', { class: 'btn danger', text: t('common.confirm') });
-    ok.onclick = async () => { if ((await run(fn(), okKey)) !== undefined) closeModal(); };
-    const cancel = h('button', { class: 'btn', text: t('common.cancel') });
-    cancel.onclick = closeModal;
-    box.append(h('p', { text }), h('div', { class: 'modal-actions' }, cancel, ok));
-  });
-}
-
-function duplicateDialog(p: Profile): void {
-  modal(t('profile.duplicate'), (box) => {
-    const name = h('input', { type: 'text', maxlength: '64', value: `${p.name} (2)` });
-    const data = toggle(false, 'profile.duplicateWithData');
-    const ok = h('button', { class: 'btn primary', text: t('profile.duplicate') });
-    ok.onclick = async () => {
-      const withData = (data.querySelector('input') as HTMLInputElement).checked;
-      if ((await run(api.invoke('mgr:duplicate', p.id, name.value.trim(), withData), 'toast.profileCreated')) !== undefined) closeModal();
-    };
-    box.append(field('profile.name', name), data, h('p', { class: 'hint', text: t('profile.duplicateHint') }), h('div', { class: 'modal-actions' }, ok));
-  });
-}
-
-async function exportDialog(p: Profile): Promise<void> {
-  // The file gets its own fresh phrase; the user has to confirm they wrote it down.
-  const phrase = await run(api.invoke<string>('mgr:new-passphrase'));
-  if (!phrase) return;
-  modal(t('profile.export'), (box) => {
-    const data = toggle(true, 'export.withData');
-    const err = h('div', { class: 'err' });
-    const ok = h('button', { class: 'btn primary', text: t('profile.export') }) as HTMLButtonElement;
-    ok.disabled = true;
-    const shown = phraseDisplay(phrase, (confirmed) => { ok.disabled = !confirmed; });
-    ok.onclick = async () => {
-      const withData = (data.querySelector('input') as HTMLInputElement).checked;
-      ok.disabled = true;
-      const r = await run(api.invoke<boolean>('mgr:export', p.id, phrase, withData));
-      ok.disabled = false;
-      if (r) { toast(t('toast.exported'), 'ok'); closeModal(); }
-    };
-    box.append(h('p', { class: 'info', text: t('export.info') }), shown.el, data, err, h('div', { class: 'modal-actions' }, ok));
-  });
-}
-
-function importDialog(): void {
-  modal(t('profile.import'), (box) => {
-    const ok = h('button', { class: 'btn primary', text: t('import.choose') }) as HTMLButtonElement;
-    const entry = phraseEntry((complete) => { ok.disabled = !complete; });
-    ok.disabled = true;
-    ok.onclick = async () => {
-      const r = await run(api.invoke<Profile | null>('mgr:import', entry.value()));
-      if (r) { toast(t('toast.imported', { name: r.name }), 'ok'); closeModal(); }
-    };
-    box.append(h('p', { class: 'hint', text: t('import.info') }), entry.el, h('div', { class: 'modal-actions' }, ok));
-    entry.focus();
-  });
-}
-
-function encryptionDialog(p: Profile): void {
-  modal(t(p.encrypted ? 'profile.disableEncryption' : 'profile.enableEncryption'), (box) => {
-    const err = h('div', { class: 'err' });
-    const ok = h('button', { class: 'btn primary', text: t('common.save') }) as HTMLButtonElement;
-    box.append(
-      h('p', { class: 'info', text: t(p.encrypted ? 'enc.disableInfo' : 'enc.enableInfo') }),
-      h('p', { class: 'note', text: t('security.malwareNotice') }),
-    );
-
-    if (p.encrypted) {
-      // Turning encryption OFF: the existing 12 words are needed once.
-      const entry = phraseEntry((complete) => { ok.disabled = !complete; });
-      ok.disabled = true;
-      box.append(entry.el);
-      ok.onclick = async () => {
-        ok.disabled = true;
-        ok.textContent = t('enc.working');
-        const r = await run(api.invoke('mgr:set-encryption', p.id, false, entry.value()), 'toast.saved');
-        ok.textContent = t('common.save');
-        if (r !== undefined) closeModal();
-        else { ok.disabled = false; entry.setError(t('unlock.wrong')); }
-      };
-    } else {
-      // Turning encryption ON: the phrase is generated by the main process and
-      // shown here once, before the profile is sealed.
-      box.append(h('p', { class: 'hint', text: t('enc.noRecovery') }));
-      ok.onclick = async () => {
-        ok.disabled = true;
-        ok.textContent = t('enc.working');
-        const r = await run(api.invoke<{ passphrase: string }>('mgr:set-encryption', p.id, true));
-        ok.textContent = t('common.save');
-        if (!r) { ok.disabled = false; return; }
-        closeModal();
-        showPassphrase(r.passphrase);
-      };
-    }
-    box.append(err, h('div', { class: 'modal-actions' }, ok));
-  });
-}
-
-/** The one and only time a profile passphrase is displayed. */
-function showPassphrase(passphrase: string): void {
-  modal(t('phrase.title'), (box) => {
-    const done = h('button', { class: 'btn primary', text: t('common.close') }) as HTMLButtonElement;
-    done.disabled = true;
-    const shown = phraseDisplay(passphrase, (confirmed) => { done.disabled = !confirmed; });
-    done.onclick = () => { closeModal(); toast(t('toast.saved'), 'ok'); };
-    box.append(shown.el, h('div', { class: 'modal-actions' }, done));
-  });
-}
-
-function resealDialog(p: Profile): void {
-  modal(t('profile.reseal'), (box) => {
-    const ok = h('button', { class: 'btn primary', text: t('profile.reseal') }) as HTMLButtonElement;
-    const entry = phraseEntry((complete) => { ok.disabled = !complete; });
-    ok.disabled = true;
-    ok.onclick = async () => {
-      const r = await run(api.invoke('mgr:reseal', p.id, entry.value()), 'toast.saved');
-      if (r !== undefined) closeModal();
-      else entry.setError(t('unlock.wrong'));
-    };
-    box.append(h('p', { class: 'hint', text: t('profile.needsResealing') }), entry.el, h('div', { class: 'modal-actions' }, ok));
-    entry.focus();
-  });
-}
-
-/** Pre-launch summary: what the profile can access (spec §6), then launch. */
-async function preLaunch(p: Profile): Promise<void> {
-  if (p.running) { await run(api.invoke('mgr:launch', p.id, {})); return; }
-  const items = (await run(api.invoke<IsoItem[]>('mgr:isolation', p.id))) ?? [];
-  modal(t('launch.title', { name: p.name }), (box) => {
-    const list = h('div', { class: 'iso' });
-    for (const it of items) {
-      list.append(h('div', { class: `iso-row ${it.state}` }, h('span', { class: 'k', text: t(it.labelKey) }), h('span', { class: 'v', text: tv(it.value) })));
-    }
-    box.append(h('p', { class: 'hint', text: t('launch.summary') }), list);
-    let entry: ReturnType<typeof phraseEntry> | null = null;
-    if (p.encrypted && p.sealed) {
-      entry = phraseEntry();
-      box.append(h('p', { class: 'hint', text: t('launch.passphraseNeeded') }), entry.el);
-    }
-    const err = h('div', { class: 'err' });
-    const ok = h('button', { class: 'btn primary' }, icon('play', 15), ` ${t('profile.launch')}`);
-    const go = async (forceRestricted = false) => {
-      ok.disabled = true;
-      const r = await run(api.invoke<{ status: string }>('mgr:launch', p.id, { passphrase: entry?.value(), forceRestricted }));
-      ok.disabled = false;
-      if (!r) return;
-      switch (r.status) {
-        case 'started': case 'focused': case 'wsb-launched': case 'tor-launched': closeModal(); toast(t(`launch.status.${r.status}`), 'ok'); break;
-        case 'need-passphrase': err.textContent = t('launch.passphraseNeeded'); entry?.focus(); break;
-        case 'wrong-passphrase': err.textContent = t('unlock.wrong'); entry?.setError(t('unlock.wrong')); entry?.focus(); break;
-        case 'tor-missing': torMissing(); break;
-        case 'wsb-unavailable': wsbUnavailable(p); break;
-        default: err.textContent = r.status;
-      }
-    };
-    ok.onclick = () => void go();
-    box.append(err, h('div', { class: 'modal-actions' }, ok));
-  }, true);
-}
-
-function torMissing(): void {
-  modal(t('tor.missingTitle'), (box) => {
-    const dl = h('button', { class: 'btn primary', text: t('tor.download') });
-    dl.onclick = () => void api.invoke('mgr:open-external', 'tor');
-    const pick = h('button', { class: 'btn', text: t('tor.pick') });
-    pick.onclick = async () => { const r = await run(api.invoke<string | null>('mgr:pick-tor')); if (r) { toast(t('toast.saved'), 'ok'); closeModal(); } };
-    box.append(h('p', { text: t('tor.missing') }), h('p', { class: 'hint', text: t('tor.why') }), h('div', { class: 'modal-actions' }, pick, dl));
-  });
-}
-
-function wsbUnavailable(p: Profile): void {
-  modal(t('wsb.unavailableTitle'), (box) => {
-    const docs = h('button', { class: 'btn', text: t('wsb.howToEnable') });
-    docs.onclick = () => void api.invoke('mgr:open-external', 'wsb-docs');
-    const fallback = h('button', { class: 'btn primary', text: t('wsb.useRestricted') });
-    fallback.onclick = async () => {
-      const r = await run(api.invoke<{ status: string }>('mgr:launch', p.id, { forceRestricted: true }));
-      if (r?.status === 'need-passphrase') { closeModal(); void preLaunch({ ...p, sandbox: { ...p.sandbox, mode: 'restricted' } }); return; }
-      if (r) closeModal();
-    };
-    box.append(h('p', { text: t('wsb.unavailable') }), h('p', { class: 'hint', text: t('wsb.fallbackInfo') }), h('div', { class: 'modal-actions' }, docs, fallback));
-  });
-}
-
-// ------------------------------------------------------------------ profile editor
-
-function editProfile(p: Profile): void {
-  const draft: Profile = JSON.parse(JSON.stringify(p));
-  const secrets = { proxyUsername: '', proxyPassword: '', clearProxyCredentials: false };
-  let tab = 'general';
-  modal(t('profile.editTitle', { name: p.name }), (box) => {
-    const tabs = h('div', { class: 'tabs' });
-    const body = h('div', { class: 'tab-body' });
-    const TABS = ['general', 'privacy', 'network', 'sandbox', 'addons'];
-    const draw = () => {
-      clear(tabs);
-      for (const k of TABS) {
-        const b = h('button', { class: k === tab ? 'on' : '', text: t(`edit.tab.${k}`) });
-        b.onclick = () => { tab = k; draw(); };
-        tabs.append(b);
-      }
-      clear(body);
-      if (tab === 'general') editGeneral(body, draft);
-      if (tab === 'privacy') editPrivacy(body, draft);
-      if (tab === 'network') editNetwork(body, draft, secrets);
-      if (tab === 'sandbox') editSandbox(body, draft);
-      if (tab === 'addons') editAddons(body, draft);
-    };
-    draw();
-    const save = h('button', { class: 'btn primary', text: t('common.save') });
-    save.onclick = async () => {
-      const patch = {
-        name: draft.name, color: draft.color, homePage: draft.homePage, keepHistory: draft.keepHistory, restoreSession: draft.restoreSession,
-        deleteOnClose: draft.deleteOnClose, protection: draft.protection, network: draft.network, dns: draft.dns, sandbox: draft.sandbox,
-        addons: draft.addons, ...secrets,
-      };
-      if ((await run(api.invoke('mgr:update', p.id, patch), 'toast.saved')) !== undefined) closeModal();
-    };
-    const note = p.running ? h('p', { class: 'hint', text: t('edit.runningNote') }) : null;
-    box.append(tabs, body, note ?? '', h('div', { class: 'modal-actions' }, save));
-  }, true);
-}
-
-function editGeneral(b: HTMLElement, d: Profile): void {
-  const name = h('input', { type: 'text', value: d.name, maxlength: '64' });
-  name.oninput = () => { d.name = name.value; };
-  const color = h('input', { type: 'color', value: d.color });
-  color.oninput = () => { d.color = color.value; };
-  const home = h('input', { type: 'text', value: d.homePage, maxlength: '2048' });
-  home.oninput = () => { d.homePage = home.value.trim() || 'octo://newtab'; };
-  const theme = select<'dark' | 'light'>(d.theme === 'light' ? 'light' : 'dark', [['dark', t('profile.theme.dark')], ['light', t('profile.theme.light')]], (v) => { d.theme = v; });
-  b.append(
-    field('profile.name', name), field('profile.color', color), field('profile.homePage', home, 'profile.homePageHint'),
-    field('profile.theme', theme, 'profile.themeHint'),
-    toggle(d.keepHistory, 'profile.keepHistory', (v) => { d.keepHistory = v; }),
-    toggle(d.restoreSession, 'profile.restoreSession', (v) => { d.restoreSession = v; }),
-    toggle(d.deleteOnClose || d.kind === 'temporary', 'profile.deleteOnClose', (v) => { d.deleteOnClose = v; }, d.kind === 'temporary'),
-    h('p', { class: 'hint', text: t('profile.historyNote') }),
-  );
-}
-
-const OVERRIDES: Array<{ key: string; type: 'bool' | 'enum'; values?: string[] }> = [
-  { key: 'blockAds', type: 'bool' }, { key: 'blockTrackers', type: 'bool' }, { key: 'httpsOnly', type: 'bool' },
-  { key: 'blockThirdPartyCookies', type: 'bool' }, { key: 'stripTrackingParams', type: 'bool' }, { key: 'blockBounceTracking', type: 'bool' },
-  { key: 'webrtc', type: 'enum', values: ['default', 'default_public_interface_only', 'disable_non_proxied_udp'] },
-  { key: 'canvas', type: 'enum', values: ['allow', 'block-readback'] }, { key: 'webgl', type: 'enum', values: ['allow', 'disabled'] },
-  { key: 'hardwareApis', type: 'enum', values: ['allow', 'normalize'] }, { key: 'blockAutoplay', type: 'bool' },
-  { key: 'clearOnExit', type: 'bool' }, { key: 'warnDangerousDownloads', type: 'bool' }, { key: 'blockPopups', type: 'bool' },
-  { key: 'trimReferrer', type: 'bool' }, { key: 'globalPrivacyControl', type: 'bool' },
-  { key: 'geolocation', type: 'enum', values: ['ask', 'block'] }, { key: 'notifications', type: 'enum', values: ['ask', 'block'] },
-  { key: 'confirmCrossSiteRedirects', type: 'bool' },
-];
-
-function editPrivacy(b: HTMLElement, d: Profile): void {
-  if (d.kind === 'tor') {
-    b.append(h('p', { class: 'info', text: t('edit.torFixed') }));
-    return;
-  }
-  const lvl = select<'standard' | 'strict'>(d.protection.level === 'strict' ? 'strict' : 'standard', [['standard', t('level.standard')], ['strict', t('level.strict')]], (v) => {
-    d.protection = { level: v, overrides: {} };
-    clear(b);
-    editPrivacy(b, d);
-  });
-  b.append(field('privacy.level', lvl), h('p', { class: 'hint', text: t(`level.${d.protection.level}.desc`) }), h('h3', { text: t('edit.overrides') }), h('p', { class: 'hint', text: t('edit.overridesHint') }));
-  const grid = h('div', { class: 'ov-grid' });
-  const ov = (d.protection.overrides ??= {});
-  for (const o of OVERRIDES) {
-    const cur = ov[o.key];
-    const label = t(`ov.${o.key}`);
-    let ctl: HTMLElement;
-    if (o.type === 'bool') {
-      ctl = select<string>(cur === undefined ? 'preset' : cur ? 'on' : 'off', [['preset', t('edit.preset')], ['on', t('state.on')], ['off', t('state.off')]], (v) => {
-        if (v === 'preset') delete ov[o.key]; else ov[o.key] = v === 'on';
-      });
-    } else {
-      ctl = select<string>(cur === undefined ? 'preset' : String(cur), [['preset', t('edit.preset')], ...o.values!.map((x) => [x, t(`${o.key === 'hardwareApis' ? 'hardware' : o.key}.${x}`)] as [string, string])], (v) => {
-        if (v === 'preset') delete ov[o.key]; else ov[o.key] = v;
-      });
-    }
-    grid.append(h('span', { text: label }), ctl);
-  }
-  b.append(grid, h('p', { class: 'hint', text: t('privacy.consistentNote') }));
-}
-
-function editNetwork(b: HTMLElement, d: Profile, secrets: { proxyUsername: string; proxyPassword: string; clearProxyCredentials: boolean }): void {
-  const mode = select(d.network.mode, [['system', t('net.mode.system')], ['direct', t('net.mode.direct')], ['proxy', t('net.mode.proxy')]], (v) => { d.network.mode = v; clear(b); editNetwork(b, d, secrets); });
-  b.append(field('net.modeLabel', mode));
-  if (d.network.mode === 'proxy') {
-    const rules = h('input', { type: 'text', value: d.network.proxyRules ?? '', placeholder: 'socks5://127.0.0.1:9050', maxlength: '512' });
-    rules.oninput = () => { d.network.proxyRules = rules.value.trim(); };
-    const bypass = h('input', { type: 'text', value: d.network.proxyBypass ?? '', placeholder: '<local>', maxlength: '512' });
-    bypass.oninput = () => { d.network.proxyBypass = bypass.value.trim(); };
-    const user = h('input', { type: 'text', placeholder: d.hasProxyCredentials ? t('net.credsStored') : '', maxlength: '256', autocomplete: 'off' });
-    user.oninput = () => { secrets.proxyUsername = user.value; };
-    const pass = h('input', { type: 'password', maxlength: '256', autocomplete: 'new-password' });
-    pass.oninput = () => { secrets.proxyPassword = pass.value; };
-    b.append(field('net.proxyRules', rules, 'net.proxyRulesHint'), field('net.proxyBypass', bypass), field('net.proxyUser', user), field('net.proxyPass', pass, 'net.credsHint'));
-    if (d.hasProxyCredentials) b.append(toggle(false, 'net.clearCreds', (v) => { secrets.clearProxyCredentials = v; }));
-  }
-  const dns = select(d.dns.mode, [['inherit', t('dns.inherit')], ['system', t('dns.system')], ['doh', t('dns.doh')]], (v) => { d.dns.mode = v; clear(b); editNetwork(b, d, secrets); });
-  b.append(field('dns.label', dns));
-  if (d.dns.mode === 'doh') {
-    const tpl = h('input', { type: 'text', value: d.dns.dohTemplate || 'https://dns.quad9.net/dns-query', maxlength: '512' });
-    d.dns.dohTemplate = tpl.value;
-    tpl.oninput = () => { d.dns.dohTemplate = tpl.value.trim(); };
-    b.append(field('dns.template', tpl, 'dns.templateHint'));
-  }
-  b.append(h('p', { class: 'hint', text: t('net.vpnNote') }));
-}
-
-function editSandbox(b: HTMLElement, d: Profile): void {
-  const mode = select(d.sandbox.mode, [['none', t('iso.mode.none')], ['restricted', t('iso.mode.restricted')], ['windows-sandbox', `${t('iso.mode.windows-sandbox')} (${t('sandbox.testVersion')})`]], (v) => { d.sandbox.mode = v; });
-  const clip = select(d.sandbox.clipboard, [['allow', t('iso.clipboard.allow')], ['write-only', t('iso.clipboard.write-only')], ['block', t('iso.clipboard.block')]], (v) => { d.sandbox.clipboard = v; });
-  b.append(
-    field('iso.mode', mode, init.windowsSandbox ? 'sandbox.hint' : 'sandbox.hintNoWsb'),
-    field('iso.clipboard', clip),
-    toggle(d.sandbox.camera, 'sandbox.camera', (v) => { d.sandbox.camera = v; }),
-    toggle(d.sandbox.microphone, 'sandbox.microphone', (v) => { d.sandbox.microphone = v; }),
-    toggle(d.sandbox.externalDevices, 'sandbox.devices', (v) => { d.sandbox.externalDevices = v; }),
-    toggle(d.sandbox.shareDownloads, 'sandbox.shareDownloads', (v) => { d.sandbox.shareDownloads = v; }),
-    h('p', { class: 'hint', text: t('sandbox.appContainerNote') }),
-  );
-}
-
-function editAddons(b: HTMLElement, d: Profile): void {
-  if (d.kind === 'tor') { b.append(h('p', { class: 'info', text: t('addons.torNote') })); return; }
-  b.append(h('p', { class: 'hint', text: t('addons.intro') }));
-  const set = new Set(d.addons);
-  for (const a of init.addons) {
-    const perms = h('ul', { class: 'small' });
-    for (const p of a.permissions) perms.append(h('li', { text: L(p) }));
-    const tg = toggle(set.has(a.id), 'addons.enabled', (v) => { if (v) set.add(a.id); else set.delete(a.id); d.addons = [...set]; }, a.kind === 'external-app');
-    b.append(h('div', { class: 'addon' },
-      h('div', { class: 'row between' }, h('b', { text: a.name }), tg),
-      h('div', { class: 'small', text: L(a.description) }),
-      h('details', {}, h('summary', { text: t('addons.details') }),
-        h('div', { class: 'small' }, `${t('addons.version')}: ${a.version} · ${t('addons.license')}: ${a.license} · ${t(`addons.status.${a.status}`)}`),
-        h('div', { class: 'small muted' }, `${t('addons.source')}: ${a.source}`),
-        h('div', { class: 'small' }, `${t('addons.permissions')}:`), perms,
-        h('div', { class: 'small muted' }, `${t('addons.integrity')}: ${L(a.integrity)}`))));
-  }
-}
 
 // ------------------------------------------------------------------ security
 
@@ -919,7 +187,7 @@ function renderSecurity(v: HTMLElement): void {
         setMasterPassword: (current, next, repeat) => api.invoke('mgr:master-password', 'set', current, next, repeat),
         removeMasterPassword: (current) => api.invoke('mgr:master-password', 'remove', current),
         saveSettings: (patch) => saveSettings(patch),
-        confirm: (text, fn) => confirmDialog(text, fn, 'toast.saved'),
+        confirm: (text, fn) => confirmDialog(text, fn, 'toast.saved', false),
       },
       () => { void refreshInit(); },
     ),
@@ -1127,17 +395,28 @@ function renderAbout(v: HTMLElement): void {
 
 async function boot(): Promise<void> {
   init = await api.invoke<Init>('mgr:init');
+  S.init = init;
+  init.settings.api ??= { enabled: false, port: 35555 };
   setDicts(init.dicts);
   setLang(init.lang);
+  document.documentElement.lang = init.lang;
   applyI18n();
-  profiles = await api.invoke<Profile[]>('mgr:profiles');
+  S.profiles = await api.invoke<Profile[]>('mgr:profiles');
+  S.proxies = (await api.invoke<SavedProxy[]>('mgr:proxies').catch(() => [])) ?? [];
   const q = new URLSearchParams(location.search).get('tab');
-  if (q && NAV.some(([x]) => x === q)) view = q as View;
-  api.on<Profile[]>('mgr:profiles', (list) => { profiles = list; if (view === 'profiles') render(); else renderTop(); });
-  api.on<UpdateStatus>('mgr:update-status', (u) => { init.update = u; if (view === 'updates') render(); else renderNav(); });
+  if (q && NAV.some(([x]) => x === q)) S.view = q as View;
+  // Re-render lists only when no text field has focus, so typing is never interrupted.
+  const soft = () => {
+    const a = document.activeElement;
+    if ((S.view === 'profiles' || S.view === 'proxies') && !(a instanceof HTMLInputElement && a.type !== 'checkbox' && $('view').contains(a))) render();
+    else { renderStatus(); if (S.view === 'profiles') renderFolders($('side2')); }
+  };
+  api.on<Profile[]>('mgr:profiles', (list) => { S.profiles = list; soft(); });
+  api.on<SavedProxy[]>('mgr:proxies', (list) => { S.proxies = list; soft(); });
+  api.on<UpdateStatus>('mgr:update-status', (u) => { init.update = u; if (S.view === 'updates') render(); else renderNav(); });
   api.on<{ key: string }>('mgr:toast', (m) => toast(t(m.key)));
-  api.on<string>('mgr:show-tab', (tab) => { if (NAV.some(([x]) => x === tab)) { view = tab as View; render(); } });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+  api.on<string>('mgr:show-tab', (tab) => { if (NAV.some(([x]) => x === tab)) { S.view = tab as View; render(); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closePopup(); if (!$('modal').classList.contains('hidden')) closeModal(); } });
   $('modal').addEventListener('mousedown', (e) => { if (e.target === $('modal')) closeModal(); });
   render();
 }

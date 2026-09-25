@@ -94,6 +94,8 @@ docs/                     dokumentacja
 | [docs/user-guide.md](docs/user-guide.md) | instrukcja użytkownika OctoBrowser.su |
 | [docs/octodetect.md](docs/octodetect.md) | OctoDetect.su: metodologia, poziomy ryzyka, ograniczenia |
 | [docs/architecture.md](docs/architecture.md) | architektura, procesy, IPC, układ danych |
+| [docs/antidetect.md](docs/antidetect.md) | profile antidetect: fingerprint (OS, UA, WebGL, WebRTC…), proxy i autodetekcja formatu |
+| [docs/api.md](docs/api.md) | lokalne REST API (profile, proxy, fingerprinty, start/stop, Puppeteer/Playwright) |
 | [docs/technology-choice.md](docs/technology-choice.md) | porównanie technologii i uzasadnienie wyboru |
 | [docs/components.md](docs/components.md) | weryfikacja komponentów open source |
 | [docs/security-model.md](docs/security-model.md) | szyfrowanie, auto-blokada, granice ochrony |

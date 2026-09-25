@@ -343,7 +343,7 @@ export class Manager {
     if (input.mode === 'keep') return cur;
     if (input.mode === 'none') {
       this.ctx.secrets.delete(`proxy:${id}`);
-      return this.profiles.update(id, { network: { ...cur.network, mode: 'direct', proxy: undefined, proxyRules: '', hasProxyCredentials: false }, proxyCheck: undefined });
+      return this.profiles.update(id, { network: { ...cur.network, mode: 'system', proxy: undefined, proxyRules: '', hasProxyCredentials: false }, proxyCheck: undefined });
     }
     const { px, name, savedId } = this.resolveProxy(input);
     if (px.username || px.password) this.ctx.secrets.set(`proxy:${id}`, JSON.stringify({ username: px.username, password: px.password }));

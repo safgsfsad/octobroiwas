@@ -493,14 +493,14 @@ export class ProfileRuntime {
       sandbox: this.profile.sandbox,
     }));
     handle('ui:set-level', L, async (_e, level: string) => {
-      if (this.profile.kind === 'tor' || !['standard', 'strict'].includes(level)) throw new Error('invalid level');
+      if (this.profile.kind === 'tor' || !['normal', 'standard', 'strict'].includes(level)) throw new Error('invalid level');
       // Apply locally FIRST: the renderer re-opens the panel as soon as this
       // call resolves, so waiting for the manager round-trip would show the
       // previous level's values ("Standard and Strict look the same").
-      this.profile = { ...this.profile, protection: { level: level as 'standard' | 'strict' } };
+      this.profile = { ...this.profile, protection: { level: level as 'normal' | 'standard' | 'strict' } };
       await this.controller.update(this.profile);
       this.pushAll();
-      this.requestProfileUpdate({ protection: { level: level as 'standard' | 'strict' } });
+      this.requestProfileUpdate({ protection: { level: level as 'normal' | 'standard' | 'strict' } });
       return true;
     });
     handle('ui:addon', L, (_e, id: string, on: boolean) => {

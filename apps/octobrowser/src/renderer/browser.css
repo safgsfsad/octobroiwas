@@ -1,8 +1,8 @@
-/* apps/octobrowser/src/renderer/browser.css - OctoBrowser chrome UI (dark navy / graphite / violet). */
+/* apps/octobrowser/src/renderer/browser.css - OctoBrowser chrome UI (graphite + blue accent, same palette as the launcher; optional light theme). */
 :root {
-  --bg: #000; --bg2: #0a0a0a; --panel: #101010; --panel2: #171717; --line: #2a2a2a;
-  --text: #f5f5f5; --muted: #a1a1a1; --dim: #6e6e6e;
-  --accent: #fff; --accent2: #fff; --ok: #fff; --warn: #fff; --bad: #fff;
+  --bg: #151517; --bg2: #1b1b1d; --panel: #252528; --panel2: #2c2c30; --line: #37373d;
+  --text: #ececef; --muted: #a3a3ad; --dim: #7a7a84;
+  --accent: #2d8cf0; --accent2: #4a9ff5; --ok: #4cc26a; --warn: #f0b429; --bad: #ef5b5b;
   --radius: 10px; --gap: 14px; --gap-lg: 22px;
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
@@ -44,7 +44,7 @@ body.vertical #tabstrip #tabs { display: none; }
   background: transparent; border-radius: 9px 9px 0 0; color: var(--muted); cursor: default; position: relative; }
 .tab:hover { background: var(--bg2); color: var(--text); }
 .tab.active { background: var(--panel); color: var(--text); }
-.tab.active::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: 0; height: 2px; background: #fff; border-radius: 2px; }
+.tab.active::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: 0; height: 2px; background: var(--accent); border-radius: 2px; }
 .tab.pinned { flex: 0 0 40px; justify-content: center; }
 .tab.sleeping { opacity: .55; }
 .tab.split { box-shadow: 0 10px 30px #000; }
@@ -120,7 +120,7 @@ body.vertical #tabstrip #tabs { display: none; }
 .btn { border: 1px solid var(--line); background: var(--panel); padding: 6px 12px; border-radius: 8px; }
 .btn:hover { border-color: var(--accent); }
 .btn.small { padding: 4px 10px; font-size: 12px; }
-.btn.primary { background: #fff; border: 0; color: #000; font-weight: 600; }
+.btn.primary { background: var(--accent); border: 0; color: #fff; font-weight: 600; }
 .btn.danger { border-color: var(--panel2); color: var(--text); }
 .btn.ghost { background: transparent; }
 
@@ -157,7 +157,7 @@ body.vertical #tabstrip #tabs { display: none; }
 .hero.warn { background: var(--panel2); color: var(--text); }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
 .seg button { border: 0; background: transparent; padding: 6px 14px; }
-.seg button.on { background: var(--accent); color: #000; }
+.seg button.on { background: var(--accent); color: #fff; }
 .seg button:disabled { opacity: .5; }
 .issues { margin: 0; padding-left: 18px; } .issues li.warn { color: var(--text); }
 .note { background: var(--panel2); border: 1px solid var(--panel2); border-radius: 8px; padding: 8px 10px; color: var(--text); }

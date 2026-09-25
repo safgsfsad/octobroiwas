@@ -8,19 +8,16 @@
   <link rel="stylesheet" href="launcher.css">
 </head>
 <body>
-  <aside id="side">
-    <div class="brand"><img src="../assets/logo.svg" alt="" width="34" height="34"><div><b>OctoBrowser</b><span>.su</span></div></div>
-    <nav id="nav"></nav>
-    <div id="sideFoot" class="muted small"></div>
-  </aside>
-  <main>
-    <header id="top">
-      <div id="secStatus" class="sec-status"></div>
-      <div class="grow"></div>
-      <button id="lockAll" class="btn"></button>
-    </header>
-    <section id="view"></section>
-  </main>
+  <div id="app">
+    <aside id="rail">
+      <div class="brand" title="OctoBrowser.su"><img src="../assets/logo.svg" alt="OctoBrowser.su" width="30" height="30"></div>
+      <nav id="nav"></nav>
+      <div id="sideFoot"></div>
+    </aside>
+    <aside id="side2" class="hidden"></aside>
+    <main><section id="view"></section></main>
+  </div>
+  <footer id="statusbar"></footer>
   <div id="modal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-box" id="modalBox"></div></div>
   <div id="toasts" aria-live="polite"></div>
   <script src="launcher.js"></script>

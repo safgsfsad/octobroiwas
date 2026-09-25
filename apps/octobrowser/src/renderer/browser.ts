@@ -21,7 +21,7 @@ interface TabState {
   security: 'https' | 'http' | 'internal' | 'other'; crashed: boolean; zoom: number; redirectBlocked?: string;
 }
 interface ProfileInfo {
-  id: string; name: string; kind: string; color: string; level: 'standard' | 'strict' | 'tor'; encrypted: boolean;
+  id: string; name: string; kind: string; color: string; level: 'normal' | 'standard' | 'strict' | 'tor'; encrypted: boolean;
   sandbox: 'none' | 'restricted' | 'windows-sandbox'; network: 'system' | 'direct' | 'proxy'; deleteOnClose: boolean;
   audio: { muted: boolean; volume: number; outputDeviceId: string }; addons: string[];
   theme: 'dark' | 'light';
@@ -541,7 +541,7 @@ async function renderPrivacy(body: HTMLElement): Promise<void> {
   body.append(h('div', { class: `hero ${hasWarn ? 'warn' : 'ok'}` }, icon(hasWarn ? 'shieldAlert' : 'shieldCheck', 28), h('div', {}, h('b', { text: t(hasWarn ? 'status.attention' : 'status.protectionActive') }), h('div', { class: 'small muted', text: t('status.noGuarantee') }))));
 
   const lvl = h('div', { class: 'seg' });
-  for (const l of ['standard', 'strict'] as const) {
+  for (const l of ['normal', 'standard', 'strict'] as const) {
     const b = h('button', { class: s.level === l ? 'on' : '', text: t(`level.${l}`), disabled: info.profile.kind === 'tor' });
     b.onclick = () => void api.invoke('ui:set-level', l).then(() => openPanel('privacy', () => void renderPrivacy($('panelBody')), t('panel.privacy'))).catch((e: Error) => toast('err.generic', { message: e.message }));
     lvl.append(b);
