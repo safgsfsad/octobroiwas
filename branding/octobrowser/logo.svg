@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- branding/octobrowser/logo.svg - OctoBrowser.su logo (original artwork, MPL-2.0 project asset).
+     Octagon shield in navy with a violet gradient ring and an eight-segment "aperture" core. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="ob-ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9b7bff"/>
+      <stop offset="1" stop-color="#5b8cff"/>
+    </linearGradient>
+    <radialGradient id="ob-core" cx="0.5" cy="0.42" r="0.6">
+      <stop offset="0" stop-color="#1d2550"/>
+      <stop offset="1" stop-color="#0b1020"/>
+    </radialGradient>
+  </defs>
+  <!-- outer octagon -->
+  <path d="M84 12h88l72 72v88l-72 72H84l-72-72V84z" fill="url(#ob-ring)"/>
+  <!-- inner octagon -->
+  <path d="M92 32h72l60 60v72l-60 60H92l-60-60V92z" fill="url(#ob-core)"/>
+  <!-- eight aperture blades -->
+  <g fill="none" stroke="url(#ob-ring)" stroke-width="10" stroke-linecap="round">
+    <path d="M128 70a58 58 0 0 1 41 17"/>
+    <path d="M186 128a58 58 0 0 1-17 41"/>
+    <path d="M128 186a58 58 0 0 1-41-17"/>
+    <path d="M70 128a58 58 0 0 1 17-41"/>
+  </g>
+  <g fill="none" stroke="#c9bbff" stroke-width="6" stroke-linecap="round" opacity="0.75">
+    <path d="M169 87a58 58 0 0 1 17 41"/>
+    <path d="M169 169a58 58 0 0 1-41 17"/>
+    <path d="M87 169a58 58 0 0 1-17-41"/>
+    <path d="M87 87a58 58 0 0 1 41-17"/>
+  </g>
+  <!-- core -->
+  <circle cx="128" cy="128" r="26" fill="url(#ob-ring)"/>
+  <circle cx="128" cy="128" r="11" fill="#0b1020"/>
+</svg>

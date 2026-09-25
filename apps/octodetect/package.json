@@ -1,0 +1,10 @@
+{
+  "name": "octodetect",
+  "productName": "OctoDetect.su",
+  "version": "0.1.0",
+  "description": "Privacy and browser fingerprinting audit tool (OctoSuite)",
+  "author": "OctoSuite contributors",
+  "license": "MPL-2.0",
+  "private": true,
+  "main": "dist/main.js"
+}

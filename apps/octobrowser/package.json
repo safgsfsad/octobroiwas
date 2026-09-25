@@ -1,0 +1,10 @@
+{
+  "name": "octobrowser",
+  "productName": "OctoBrowser.su",
+  "version": "0.1.0",
+  "description": "Private, secure multi-purpose browser (OctoSuite)",
+  "author": "OctoSuite contributors",
+  "license": "MPL-2.0",
+  "private": true,
+  "main": "dist/main.js"
+}

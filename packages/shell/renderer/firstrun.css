@@ -1,0 +1,37 @@
+/* packages/shell/renderer/firstrun.css */
+.wizard { display: grid; grid-template-columns: 230px 1fr; height: 100vh; }
+.rail { background: var(--bg2); border-right: 1px solid var(--line); padding: 28px 20px; display: flex; flex-direction: column; gap: 14px; }
+.logo { width: 64px; height: 64px; }
+.product { font-weight: 700; font-size: 18px; letter-spacing: .2px; }
+.steps { list-style: none; padding: 0; margin: 18px 0 0; display: grid; gap: 10px; }
+.steps li { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+.steps li span { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; border: 1px solid var(--line); font-size: 12px; }
+.steps li.active { color: var(--text); }
+.steps li.active span { background: var(--accent); border-color: var(--accent); color: #000; }
+.steps li.done span { background: var(--panel2); border-color: var(--ok); }
+.version { margin-top: auto; font-size: 12px; }
+main { padding: 34px 38px 22px; display: flex; flex-direction: column; overflow: auto; }
+h1 { font-size: 24px; margin: 0 0 10px; line-height: 1.25; }
+h1 .muted { font-size: 18px; font-weight: 500; }
+.step { flex: 1; display: flex; flex-direction: column; gap: 12px; }
+.langs { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+.lang { display: flex; align-items: center; gap: 14px; padding: 22px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--panel); color: var(--text); font-size: 18px; }
+.lang:hover, .lang.selected { border-color: var(--accent); box-shadow: 0 10px 30px #000; }
+.lang .code { font-weight: 700; font-size: 13px; padding: 6px 8px; border-radius: 6px; background: var(--bg2); border: 1px solid var(--line); }
+.row { display: flex; gap: 10px; }
+code { display: block; margin: 6px 0; word-break: break-all; color: var(--text); }
+
+.tree { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+.small { font-size: 12px; }
+.choice { display: grid; gap: 10px; }
+.option { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); cursor: pointer; }
+.option:hover { border-color: var(--accent); }
+.option:has(input:checked) { border-color: var(--accent); box-shadow: 0 8px 24px #000; }
+.option input { margin-top: 4px; flex: none; }
+.option b { display: block; margin-bottom: 2px; }
+.option .muted { display: block; font-size: 12.5px; }
+#masterBox { display: grid; gap: 8px; }
+#masterBox .row input { flex: 1; }
+.check { display: flex; gap: 10px; align-items: center; }
+footer { display: flex; gap: 10px; align-items: center; padding-top: 14px; border-top: 1px solid var(--line); margin-top: 10px; }
+.spacer { flex: 1; }
