@@ -14,7 +14,14 @@
  *    Tor Browser, which is the only configuration the Tor Project supports.
  */
 
-export type ProtectionLevel = 'standard' | 'strict' | 'tor';
+/**
+ * normal   = behaves like a regular Chrome (every site works; antidetect profiles),
+ * standard = tracker/ad blocking + HTTPS-Only,
+ * strict   = maximal protection (may break sites),
+ * tor      = opened in the official Tor Browser.
+ */
+export type ProtectionLevel = 'normal' | 'standard' | 'strict' | 'tor';
+export const PROTECTION_LEVELS: readonly ProtectionLevel[] = ['normal', 'standard', 'strict', 'tor'];
 
 export interface PrivacySettings {
   level: ProtectionLevel;
@@ -81,6 +88,36 @@ const STANDARD: PrivacySettings = {
   confirmCrossSiteRedirects: false,
 };
 
+/**
+ * Normal: nothing that could make a site behave differently than in Chrome.
+ * No HTTPS-Only interstitials, no cookie stripping, no request rewriting, no
+ * Sec-GPC header (Chrome does not send it) - fingerprint protection for these
+ * profiles comes from the per-profile fingerprint (fingerprint.ts), not from
+ * blocking APIs.
+ */
+const NORMAL: PrivacySettings = {
+  level: 'normal',
+  blockAds: false,
+  blockTrackers: false,
+  httpsOnly: false,
+  blockThirdPartyCookies: false,
+  stripTrackingParams: false,
+  blockBounceTracking: false,
+  webrtc: 'default_public_interface_only',
+  canvas: 'allow',
+  webgl: 'allow',
+  hardwareApis: 'allow',
+  blockAutoplay: false,
+  clearOnExit: false,
+  warnDangerousDownloads: true,
+  blockPopups: true,
+  trimReferrer: false,
+  globalPrivacyControl: false,
+  geolocation: 'ask',
+  notifications: 'ask',
+  confirmCrossSiteRedirects: false,
+};
+
 const STRICT: PrivacySettings = {
   ...STANDARD,
   level: 'strict',
@@ -104,6 +141,7 @@ const TOR: PrivacySettings = { ...STRICT, level: 'tor' };
 
 export function presetFor(level: ProtectionLevel): PrivacySettings {
   switch (level) {
+    case 'normal': return { ...NORMAL };
     case 'standard': return { ...STANDARD };
     case 'strict': return { ...STRICT };
     case 'tor': return { ...TOR };
@@ -144,9 +182,11 @@ export function checkConsistency(s: PrivacySettings, ctx: { extensionsCount?: nu
     if (s.webrtc === 'default') issues.push({ key: 'consistency.strictWebrtc', severity: 'warn' });
     if (s.canvas === 'allow' || s.webgl === 'allow') issues.push({ key: 'consistency.strictFingerprint', severity: 'warn' });
   }
-  if (!s.httpsOnly) issues.push({ key: 'consistency.noHttpsOnly', severity: 'warn' });
-  if (!s.blockTrackers) issues.push({ key: 'consistency.noTrackerBlocking', severity: 'warn' });
-  if (ctx.proxyActive && s.webrtc !== 'disable_non_proxied_udp') issues.push({ key: 'consistency.proxyWebrtc', severity: 'warn' });
+  if (s.level !== 'normal') {
+    if (!s.httpsOnly) issues.push({ key: 'consistency.noHttpsOnly', severity: 'warn' });
+    if (!s.blockTrackers) issues.push({ key: 'consistency.noTrackerBlocking', severity: 'warn' });
+  }
+  if (s.level !== 'normal' && ctx.proxyActive && s.webrtc !== 'disable_non_proxied_udp') issues.push({ key: 'consistency.proxyWebrtc', severity: 'warn' });
   if (s.level === 'tor' && (ctx.extensionsCount ?? 0) > 0) issues.push({ key: 'consistency.torExtensions', severity: 'warn' });
   if ((ctx.extensionsCount ?? 0) > 5) issues.push({ key: 'consistency.manyExtensions', severity: 'info' });
   return issues;

@@ -28,8 +28,15 @@ import {
 } from './crypto';
 import { generateMnemonic, isValidMnemonic, normalizeMnemonic } from './mnemonic';
 import type { SecretStoreApi } from './secretstore';
+import { FingerprintConfig, generateFingerprint, realFingerprint, sanitizeFingerprint } from './fingerprint';
+import { PROXY_TYPES, ProxyCheckResult, ProxyType, chromiumRules, isValidHost } from './proxy';
 
-export const PROFILE_KINDS = ['personal', 'work', 'private', 'testing', 'temporary', 'tor', 'custom'] as const;
+/**
+ * antidetect = default profile type: behaves like a normal Chrome for every
+ * site, with its own consistent fingerprint (OS, UA, WebGL, hardware ...).
+ * The other kinds are privacy presets (see privacy.ts).
+ */
+export const PROFILE_KINDS = ['antidetect', 'personal', 'work', 'private', 'testing', 'temporary', 'tor', 'custom'] as const;
 export type ProfileKind = (typeof PROFILE_KINDS)[number];
 
 export interface NetworkConfig {
@@ -40,6 +47,45 @@ export interface NetworkConfig {
   proxyBypass?: string;
   /** true when a username/password is stored in SecretStore under "proxy:<id>". */
   hasProxyCredentials?: boolean;
+  /**
+   * Structured proxy (set by the proxy editor). When present, proxyRules is
+   * derived from it; credentials are in SecretStore ("proxy:<id>").
+   */
+  proxy?: ProfileProxy;
+}
+
+export interface ProfileProxy {
+  type: ProxyType;
+  host: string;
+  port: number;
+  changeIpUrl: string;
+  /** Display name of the proxy (optional). */
+  name: string;
+  /** Id of the saved proxy it came from ('' = entered in this profile). */
+  savedId: string;
+}
+
+/** Usage statistics shown in the profile list. */
+export interface ProfileStats {
+  launches: number;
+  lastLaunchAt: string;
+  /** Total seconds the profile was open. */
+  worktimeSec: number;
+}
+
+/** Engine version used for new fingerprints; set by the app from process.versions.chrome. */
+let engineFullVersion = '140.0.0.0';
+export function setEngineVersion(full: string): void {
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(full)) engineFullVersion = full;
+}
+export function engineVersion(): { full: string; major: number } {
+  return { full: engineFullVersion, major: Number(engineFullVersion.split('.')[0]) };
+}
+
+/** Fingerprint for a new profile of this kind (only antidetect profiles spoof). */
+export function fingerprintFor(kind: ProfileKind, seed?: string): FingerprintConfig {
+  const { full, major } = engineVersion();
+  return kind === 'antidetect' ? generateFingerprint({ engineMajor: major, engineFullVersion: full, seed }) : realFingerprint(major);
 }
 
 /**
@@ -99,6 +145,18 @@ export interface Profile {
   homePage: string;
   /** Window chrome colour scheme of this profile: dark grey or white. */
   theme: ProfileTheme;
+  /** Browser fingerprint (antidetect). */
+  fingerprint: FingerprintConfig;
+  /** Organisation (profile list). */
+  tags: string[];
+  folder: string;
+  status: string;
+  notes: string;
+  /** Pages opened on every start (in addition to a restored session). */
+  startPages: string[];
+  /** Last proxy check (exit IP, country, timezone) - drives "auto" timezone/language/geo. */
+  proxyCheck?: ProxyCheckResult;
+  stats: ProfileStats;
 }
 
 /** Chrome colour scheme of a profile window (no effect on rendered pages). */
@@ -140,6 +198,7 @@ export interface ProfilesDoc {
 }
 
 const COLORS: Record<ProfileKind, string> = {
+  antidetect: '#2196f3',
   personal: '#7c5cff',
   work: '#3b82f6',
   private: '#a855f7',
@@ -152,11 +211,12 @@ const COLORS: Record<ProfileKind, string> = {
 export const DEFAULT_ADDONS = ['adblock', 'clearurls', 'https-only', 'audio-mixer'];
 
 /** Build a profile with sensible defaults for its kind. */
-export function defaultProfile(kind: ProfileKind, name: string): Profile {
+export function defaultProfile(kind: ProfileKind, name: string, id = newProfileId(), seed?: string): Profile {
   const now = new Date().toISOString();
-  const level: ProtectionLevel = kind === 'tor' ? 'tor' : kind === 'private' || kind === 'temporary' ? 'strict' : 'standard';
+  const level: ProtectionLevel = kind === 'antidetect' ? 'normal' : kind === 'tor' ? 'tor' : kind === 'private' || kind === 'temporary' ? 'strict' : 'standard';
+  const anti = kind === 'antidetect';
   return {
-    id: newProfileId(),
+    id,
     name,
     kind,
     color: COLORS[kind],
@@ -168,21 +228,55 @@ export function defaultProfile(kind: ProfileKind, name: string): Profile {
     sandbox: {
       mode: kind === 'testing' || kind === 'private' ? 'restricted' : 'none',
       clipboard: kind === 'private' || kind === 'temporary' ? 'write-only' : 'allow',
-      camera: kind === 'personal' || kind === 'work',
-      microphone: kind === 'personal' || kind === 'work',
+      camera: anti || kind === 'personal' || kind === 'work',
+      microphone: anti || kind === 'personal' || kind === 'work',
       externalDevices: false,
       shareDownloads: false,
     },
     audio: { muted: false, volume: 100, outputDeviceId: '' },
-    addons: kind === 'tor' ? [] : [...DEFAULT_ADDONS],
+    addons: kind === 'tor' ? [] : anti ? ['audio-mixer'] : [...DEFAULT_ADDONS],
     encrypted: false,
     deleteOnClose: kind === 'temporary',
-    keepHistory: kind === 'personal' || kind === 'work',
-    restoreSession: kind === 'personal' || kind === 'work',
+    keepHistory: anti || kind === 'personal' || kind === 'work',
+    restoreSession: anti || kind === 'personal' || kind === 'work',
     homePage: 'octo://newtab',
     theme: 'dark',
+    fingerprint: fingerprintFor(kind, seed),
+    tags: [],
+    folder: '',
+    status: '',
+    notes: '',
+    startPages: [],
+    stats: { launches: 0, lastLaunchAt: '', worktimeSec: 0 },
   };
 }
+
+function sanitizeProxy(v: unknown): ProfileProxy | undefined {
+  const p = v as Partial<ProfileProxy> | undefined;
+  if (!p || typeof p !== 'object') return undefined;
+  if (!PROXY_TYPES.includes(p.type as ProxyType) || typeof p.host !== 'string' || !isValidHost(p.host)) return undefined;
+  const port = Number(p.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return undefined;
+  const cip = typeof p.changeIpUrl === 'string' && /^https?:\/\/\S{3,2000}$/.test(p.changeIpUrl) ? p.changeIpUrl : '';
+  return {
+    type: p.type as ProxyType, host: p.host.toLowerCase(), port, changeIpUrl: cip,
+    name: typeof p.name === 'string' ? p.name.slice(0, 64) : '',
+    savedId: typeof p.savedId === 'string' && /^[a-z0-9-]{0,64}$/.test(p.savedId) ? p.savedId : '',
+  };
+}
+
+function sanitizeCheck(v: unknown): ProxyCheckResult | undefined {
+  const c = v as Partial<ProxyCheckResult> | undefined;
+  if (!c || typeof c !== 'object' || typeof c.at !== 'string') return undefined;
+  const s = (x: unknown, n: number) => (typeof x === 'string' ? x.slice(0, n) : undefined);
+  const f = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : undefined);
+  return {
+    ok: !!c.ok, at: c.at.slice(0, 40), ip: s(c.ip, 45), country: s(c.country, 64), countryCode: s(c.countryCode, 2), region: s(c.region, 64),
+    city: s(c.city, 64), timezone: s(c.timezone, 64), latitude: f(c.latitude), longitude: f(c.longitude), latencyMs: f(c.latencyMs), error: s(c.error, 200),
+  };
+}
+
+const START_PAGE = /^(https?:\/\/|octo:\/\/)\S{1,2040}$/i;
 
 export function newProfileId(): string {
   return `p-${crypto.randomBytes(6).toString('hex')}`;
@@ -196,7 +290,9 @@ export function sanitizeProfile(input: unknown): Profile {
   if (!p || typeof p !== 'object') throw new Error('Profile must be an object');
   if (typeof p.id !== 'string' || !/^[a-z0-9-]{3,64}$/.test(p.id)) throw new Error('Invalid profile id');
   if (!PROFILE_KINDS.includes(p.kind as ProfileKind)) throw new Error('Invalid profile kind');
-  const base = defaultProfile(p.kind as ProfileKind, 'x');
+  // Deterministic base (seeded by the id): a profile without a stored fingerprint
+  // gets the same generated one on every load instead of a new one each time.
+  const base = defaultProfile(p.kind as ProfileKind, 'x', p.id, crypto.createHash('sha256').update(p.id).digest('hex').slice(0, 16));
   const name = typeof p.name === 'string' ? p.name.trim().slice(0, 64) : '';
   if (!name) throw new Error('Profile name required');
   const level = p.protection?.level;
@@ -207,7 +303,7 @@ export function sanitizeProfile(input: unknown): Profile {
     name,
     color: typeof p.color === 'string' && HEX_COLOR.test(p.color) ? p.color : base.color,
     protection: {
-      level: level === 'standard' || level === 'strict' || level === 'tor' ? level : base.protection.level,
+      level: level === 'normal' || level === 'standard' || level === 'strict' || level === 'tor' ? level : base.protection.level,
       overrides: p.kind === 'tor' ? undefined : p.protection?.overrides,
     },
     network: { ...base.network, ...(p.network ?? {}) },
@@ -216,7 +312,24 @@ export function sanitizeProfile(input: unknown): Profile {
     audio: { ...base.audio, ...(p.audio ?? {}) },
     addons: Array.isArray(p.addons) ? p.addons.filter((a) => typeof a === 'string').slice(0, 32) : base.addons,
     theme: isProfileTheme(p.theme) ? p.theme : base.theme,
+    fingerprint: sanitizeFingerprint(p.fingerprint, base.fingerprint),
+    tags: Array.isArray(p.tags) ? [...new Set(p.tags.filter((x) => typeof x === 'string').map((x) => x.trim().slice(0, 32)).filter(Boolean))].slice(0, 20) : [],
+    folder: typeof p.folder === 'string' ? p.folder.trim().slice(0, 48) : '',
+    status: typeof p.status === 'string' ? p.status.trim().slice(0, 32) : '',
+    notes: typeof p.notes === 'string' ? p.notes.slice(0, 4000) : '',
+    startPages: Array.isArray(p.startPages) ? p.startPages.filter((u) => typeof u === 'string' && START_PAGE.test(u.trim())).map((u) => u.trim()).slice(0, 10) : [],
+    proxyCheck: sanitizeCheck(p.proxyCheck),
+    stats: {
+      launches: Math.max(0, Math.round(Number(p.stats?.launches) || 0)),
+      lastLaunchAt: typeof p.stats?.lastLaunchAt === 'string' ? p.stats.lastLaunchAt.slice(0, 40) : '',
+      worktimeSec: Math.max(0, Math.round(Number(p.stats?.worktimeSec) || 0)),
+    },
   };
+  out.network.proxy = sanitizeProxy(p.network?.proxy);
+  if (out.network.proxy) {
+    out.network.proxyRules = chromiumRules(out.network.proxy);
+    if (out.network.mode !== 'proxy') out.network.proxy = undefined;
+  }
   out.audio.volume = Math.max(0, Math.min(100, Math.round(Number(out.audio.volume) || 0)));
   if (!['system', 'direct', 'proxy'].includes(out.network.mode)) out.network.mode = 'system';
   if (!['inherit', 'system', 'doh'].includes(out.dns.mode)) out.dns.mode = 'inherit';
@@ -271,10 +384,9 @@ export class ProfileManager {
   }
 
   /** Create the default profile set on first run (Personal, Work, Private, Testing, Temporary, Tor). */
-  ensureDefaults(names: Record<ProfileKind, string>): void {
+  ensureDefaults(names: Record<ProfileKind, string>, kinds: ProfileKind[] = ['personal', 'work', 'private', 'testing', 'temporary', 'tor']): void {
     const doc = this.store.load();
     if (doc.profiles.length > 0) return;
-    const kinds: ProfileKind[] = ['personal', 'work', 'private', 'testing', 'temporary', 'tor'];
     const profiles = kinds.map((k) => defaultProfile(k, names[k]));
     this.store.save({ schema: 1, profiles, lastUsedId: profiles[0].id });
     for (const p of profiles) this.ensureDirs(p.id);
@@ -331,6 +443,8 @@ export class ProfileManager {
         sandbox: { ...cur.sandbox, ...(patch.sandbox ?? {}) },
         audio: { ...cur.audio, ...(patch.audio ?? {}) },
         protection: patch.protection ?? cur.protection,
+        fingerprint: patch.fingerprint ?? cur.fingerprint,
+        stats: { ...cur.stats, ...(patch.stats ?? {}) },
       });
       d.profiles[i] = updated;
     });
@@ -346,7 +460,14 @@ export class ProfileManager {
     const copy = this.create({
       name: newName,
       kind: src.kind,
-      patch: { ...structuredClone(src), name: newName, network: { ...src.network, hasProxyCredentials: false } },
+      patch: {
+        ...structuredClone(src), name: newName, network: { ...src.network, hasProxyCredentials: false },
+        // A copy must not share the fingerprint (that would link both profiles): new seed, same OS.
+        fingerprint: src.fingerprint.enabled
+          ? { ...generateFingerprint({ engineMajor: engineVersion().major, engineFullVersion: engineVersion().full, os: src.fingerprint.os }), timezone: src.fingerprint.timezone, language: src.fingerprint.language, geolocation: src.fingerprint.geolocation, webrtc: src.fingerprint.webrtc }
+          : src.fingerprint,
+        stats: { launches: 0, lastLaunchAt: '', worktimeSec: 0 },
+      },
     });
     if (includeData) {
       copyDir(this.layout.profileEngineDir(id), this.layout.profileEngineDir(copy.id), isCachePath);

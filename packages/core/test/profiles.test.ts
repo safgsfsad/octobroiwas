@@ -9,7 +9,7 @@ import {
 import { FAST_KDF, tmpDir } from './helpers';
 
 const NAMES: Record<ProfileKind, string> = {
-  personal: 'Osobisty', work: 'Praca', private: 'Prywatny', testing: 'Testy', temporary: 'Tymczasowy', tor: 'Tor', custom: 'Własny',
+  antidetect: 'Antidetect', personal: 'Osobisty', work: 'Praca', private: 'Prywatny', testing: 'Testy', temporary: 'Tymczasowy', tor: 'Tor', custom: 'Własny',
 };
 
 function setup() {
