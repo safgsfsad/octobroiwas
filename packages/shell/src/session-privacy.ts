@@ -79,6 +79,15 @@ export interface PrivacyHooks {
   isOffline?(): boolean;
 }
 
+/** Request-level parts of an antidetect fingerprint (see core/fingerprint.ts). */
+export interface FingerprintHeaders {
+  /** Values for the Sec-CH-UA* request headers (only headers Chromium sends are rewritten). */
+  clientHints: Record<string, string>;
+  doNotTrack: boolean;
+  /** Pages may not reach these ports on the local machine (anti port-scan). */
+  protectedPorts: number[];
+}
+
 export interface DownloadInfo {
   id: string;
   profileId: string;
@@ -93,6 +102,11 @@ export interface DownloadInfo {
 }
 
 const LOCAL_HOST = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\])$/i;
+/** Loopback / unspecified addresses of THIS machine. */
+function isLoopback(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, '');
+  return h === 'localhost' || h.endsWith('.localhost') || /^127\./.test(h) || h === '::1' || h === '0.0.0.0' || h === '::';
+}
 
 function isThirdParty(requestUrl: string, firstPartyUrl: string | undefined): boolean {
   if (!firstPartyUrl) return false;
@@ -127,6 +141,9 @@ export class ProfileSessionController {
   private readonly grants = new Map<string, boolean>();
   private settings: PrivacySettings;
   private downloadSeq = 0;
+  private fpHeaders: FingerprintHeaders | null = null;
+  /** Proxy rules replacing profile.network.proxyRules (local SOCKS bridge). */
+  private proxyOverride: string | null = null;
 
   constructor(
     readonly ses: Session,
@@ -156,6 +173,18 @@ export class ProfileSessionController {
     this.installCertificateCapture();
   }
 
+  /** Route the profile through different rules (e.g. the local auth bridge); null = profile rules. */
+  async setProxyOverride(rules: string | null): Promise<void> {
+    this.proxyOverride = rules;
+    await this.applyProxy();
+    await this.ses.closeAllConnections();
+  }
+
+  /** Antidetect request headers + protected ports (null = off). */
+  setFingerprintHeaders(h: FingerprintHeaders | null): void {
+    this.fpHeaders = h;
+  }
+
   /** Re-apply after the profile was edited. */
   async update(profile: Profile): Promise<void> {
     const proxyChanged = JSON.stringify(profile.network) !== JSON.stringify(this.profile.network);
@@ -170,8 +199,8 @@ export class ProfileSessionController {
 
   private async applyProxy(): Promise<void> {
     const n = this.profile.network;
-    if (n.mode === 'proxy' && n.proxyRules) {
-      await this.ses.setProxy({ mode: 'fixed_servers', proxyRules: n.proxyRules, proxyBypassRules: n.proxyBypass || '<local>' });
+    if (n.mode === 'proxy' && (this.proxyOverride || n.proxyRules)) {
+      await this.ses.setProxy({ mode: 'fixed_servers', proxyRules: this.proxyOverride || n.proxyRules!, proxyBypassRules: n.proxyBypass || '<local>' });
     } else if (n.mode === 'direct') {
       await this.ses.setProxy({ mode: 'direct' });
     } else {
@@ -204,7 +233,18 @@ export class ProfileSessionController {
       if (!/^(https?|wss?):/i.test(url)) return cb({}); // internal / data / blob / devtools
       if (this.hooks.isOffline?.()) return cb({ cancel: true });
       let host = '';
-      try { host = new URL(url).hostname.toLowerCase(); } catch { return cb({ cancel: true }); }
+      let parsed: URL;
+      try { parsed = new URL(url); host = parsed.hostname.toLowerCase(); } catch { return cb({ cancel: true }); }
+
+      // 0. Port protection: web pages may not probe local services (RDP, VNC, TeamViewer...).
+      const fh = this.fpHeaders;
+      if (fh && fh.protectedPorts.length && details.webContentsId !== undefined && isLoopback(host)) {
+        const port = Number(parsed.port || (/^(https|wss):/i.test(url) ? 443 : 80));
+        if (fh.protectedPorts.includes(port)) {
+          this.hooks.logger.info('fingerprint.port-blocked', { port });
+          return cb({ cancel: true });
+        }
+      }
 
       // 1. HTTPS-Only upgrade
       if (s.httpsOnly && /^(http|ws):/i.test(url) && !LOCAL_HOST.test(host) && !host.endsWith('.onion') && !this.httpAllowed.has(host)) {
@@ -269,6 +309,15 @@ export class ProfileSessionController {
         }
       }
       if (s.globalPrivacyControl) setHeader(headers, 'Sec-GPC', '1');
+      const fh = this.fpHeaders;
+      if (fh) {
+        // Client hints must tell the same story as navigator.userAgentData.
+        for (const k of Object.keys(headers)) {
+          const v = fh.clientHints[k.toLowerCase()];
+          if (v !== undefined) headers[k] = v;
+        }
+        if (fh.doNotTrack) setHeader(headers, 'DNT', '1');
+      }
       cb({ requestHeaders: headers });
     });
 

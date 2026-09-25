@@ -77,6 +77,11 @@ export interface AppSettings {
     torBrowserPath: string;
   };
   offline: boolean;
+  /**
+   * Local automation REST API of the profile manager (127.0.0.1 only, Bearer
+   * token kept in the encrypted secret store). Off by default.
+   */
+  api: { enabled: boolean; port: number };
   filtersUpdatedAt?: string;
 }
 
@@ -90,6 +95,7 @@ export function defaultSettings(): AppSettings {
     ui: { verticalTabs: false, sleepTabsAfterMin: 30, showStartupSplash: true, showBookmarksBar: false, confirmOnQuit: true, openLinksInBackground: false },
     tor: { torBrowserPath: '' },
     offline: false,
+    api: { enabled: false, port: 35555 },
   };
 }
 
@@ -137,6 +143,7 @@ export function validateSettings(value: unknown): AppSettings {
     },
     tor: { torBrowserPath: typeof v.tor?.torBrowserPath === 'string' ? v.tor.torBrowserPath : '' },
     offline: !!v.offline,
+    api: { enabled: v.api?.enabled === true, port: clampInt(v.api?.port, 1024, 65535, d.api.port) },
     filtersUpdatedAt: typeof v.filtersUpdatedAt === 'string' ? v.filtersUpdatedAt : undefined,
   };
 }

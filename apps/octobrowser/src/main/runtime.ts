@@ -19,8 +19,11 @@ import { pathToFileURL } from 'node:url';
 import {
   ADDONS, AppSettings, Bookmark, DICTS, DataLayout, Lang, Logger, Profile, ProfileData, ProfileManager, SecretStore,
   VersionedStore, checkConsistency, createSettingsStore, detectVpnAdapters, dohTemplate, assessDns, parseTrace, t as translate,
-  SUITE_VERSION, searchEngineQueryUrl, wipe,
+  SUITE_VERSION, searchEngineQueryUrl, wipe, ResolvedFingerprint, resolveFingerprint, setEngineVersion, needsBridge, checkExitIp,
+  ProxyCheckResult, GeoInfo,
 } from '@octo/core';
+import { ProxyBridge } from '@octo/shell/proxy-bridge';
+import { FingerprintEmulator, fingerprintHeaders } from './fingerprint-runtime';
 import { AdblockService } from '@octo/shell/adblock';
 import { JsonLineChannel, Message, openChildChannel } from '@octo/shell/channel';
 import { handle } from '@octo/shell/ipc';
@@ -50,6 +53,10 @@ export class ProfileRuntime {
   private seq = 0;
   private publicIp: { ip?: string; at?: number; error?: string } = {};
   private quitting = false;
+  /** Fingerprint applied in this run (resolved at start from profile + proxy geo). */
+  fp!: ResolvedFingerprint;
+  private emulator: FingerprintEmulator | null = null;
+  private bridge: ProxyBridge | null = null;
 
   constructor(
     readonly distDir: string,
@@ -84,6 +91,7 @@ export class ProfileRuntime {
     if (profDoh) app.configureHostResolver({ secureDnsMode: 'secure', secureDnsServers: [profDoh] });
 
     this.adblock.init();
+    setEngineVersion(process.versions.chrome);
     const ses = session.defaultSession;
     this.registerInternalProtocol(ses);
     this.controller = new ProfileSessionController(ses, this.profile, this.layout.profileDownloadsDir(this.profile.id), {
@@ -99,7 +107,16 @@ export class ProfileRuntime {
       onBlocked: (wc) => { for (const w of this.windows.values()) w.countBlocked(wc); },
       isOffline: () => this.settings.load().offline,
     });
-    await this.controller.install(cleanUserAgent(app.userAgentFallback), acceptLanguages(this.lang));
+    // Proxy with credentials Chromium cannot use (SOCKS auth) -> local bridge.
+    await this.startProxyBridge();
+    // Resolve the fingerprint. "Auto" timezone/language/geolocation/WebRTC IP
+    // follow the exit IP, so re-check the proxy now if the profile uses them.
+    this.fp = resolveFingerprint(this.profile.fingerprint, await this.geoForFingerprint(), this.lang);
+    const ua = this.fp.enabled ? this.fp.userAgent : cleanUserAgent(app.userAgentFallback);
+    await this.controller.install(ua, this.fp.languages?.length ? this.fp.languages.join(',') : acceptLanguages(this.lang));
+    this.controller.setFingerprintHeaders(fingerprintHeaders(this.fp));
+    this.emulator = new FingerprintEmulator(this.fp, this.logger);
+    this.logger.info('fingerprint.applied', { profile: this.profile.id, enabled: this.fp.enabled, os: this.fp.os, tz: this.fp.timezone ?? 'real', lang: this.fp.languages?.[0] ?? 'real' });
 
     // Proxy authentication from the encrypted secret store only.
     app.on('login', (e, _wc, _details, authInfo, cb) => {
@@ -151,7 +168,48 @@ export class ProfileRuntime {
 
   /** Hook for every tab WebContents (fingerprint emulation is attached here). */
   onTabCreated(wc: WebContents): void {
-    void wc;
+    try { this.emulator?.attach(wc); } catch (err) { this.logger.warn('fingerprint.attach', err); }
+  }
+
+  /** Start the local SOCKS5 bridge when the profile proxy needs authentication Chromium lacks. */
+  private async startProxyBridge(): Promise<void> {
+    const n = this.profile.network;
+    const px = n.proxy;
+    if (n.mode !== 'proxy' || !px) return;
+    let creds = { username: '', password: '' };
+    try { const raw = this.secrets.get(`proxy:${this.profile.id}`); if (raw) creds = { ...creds, ...(JSON.parse(raw) as typeof creds) }; } catch { /* none */ }
+    const upstream = { type: px.type, host: px.host, port: px.port, ...creds };
+    const bridged = needsBridge(upstream);
+    if (!bridged && this.bridge) { await this.bridge.stop(); this.bridge = null; await this.controller.setProxyOverride(null); return; }
+    if (!bridged) return;
+    if (this.bridge) this.bridge.setUpstream(upstream as never);
+    else {
+      this.bridge = new ProxyBridge(upstream as never);
+      await this.bridge.start();
+    }
+    await this.controller.setProxyOverride(this.bridge.rules);
+    this.logger.info('proxy.bridge-started', { profile: this.profile.id, type: px.type });
+  }
+
+  /** Exit IP check through THIS profile's (proxied) session. */
+  async checkProxy(): Promise<ProxyCheckResult> {
+    const ses = session.defaultSession;
+    const r = await checkExitIp((url, init) => ses.fetch(url, { cache: 'no-store', credentials: 'omit', signal: init?.signal } as RequestInit) as never);
+    this.channel.send({ t: 'proxy-checked', id: this.profile.id, result: r });
+    return r;
+  }
+
+  /** Geo facts for "auto" fingerprint values: fresh proxy check, else the last stored one. */
+  private async geoForFingerprint(): Promise<GeoInfo | undefined> {
+    const f = this.profile.fingerprint;
+    if (!f.enabled) return undefined;
+    const usesAuto = f.timezone.mode === 'auto' || f.language.mode === 'auto' || f.geolocation.mode === 'auto' || f.webrtc.mode === 'altered';
+    if (!usesAuto) return undefined;
+    if (this.profile.network.mode !== 'proxy') return undefined; // real connection: real values
+    const r = await this.checkProxy().catch(() => undefined);
+    const g = r?.ok ? r : this.profile.proxyCheck?.ok ? this.profile.proxyCheck : undefined;
+    if (!r?.ok) this.logger.warn('fingerprint.proxy-check-failed', { error: r?.error });
+    return g;
   }
 
   private async shutdown(): Promise<void> {
@@ -162,6 +220,7 @@ export class ProfileRuntime {
     } catch (err) {
       this.logger.warn('profile.shutdown', err);
     }
+    try { await this.bridge?.stop(); } catch { /* ignore */ }
     wipe(this.dek);
     this.dek = null;
     this.logger.info('profile.stopped', { profile: this.profile.id });
@@ -286,6 +345,7 @@ export class ProfileRuntime {
   }
 
   private askPermission(wc: WebContents | null, kind: PermissionKind, origin: string): Promise<boolean> {
+    if (kind === 'geolocation' && this.fp?.geoBlocked) return Promise.resolve(false);
     return this.ask(wc, 'ui:permission', { kind, origin });
   }
 
@@ -496,8 +556,10 @@ export class ProfileRuntime {
         const p = m.profile as Profile;
         if (!p || p.id !== this.profile.id) return;
         const levelChanged = p.protection.level !== this.profile.protection.level;
+        const proxyChanged = JSON.stringify(p.network) !== JSON.stringify(this.profile.network);
         this.profile = p;
         await this.controller.update(p);
+        if (proxyChanged) await this.startProxyBridge();
         for (const w of this.windows.values()) w.applyProfileAudio();
         this.pushAll();
         if (levelChanged) for (const w of this.windows.values()) w.send('ui:toast', { key: 'toast.levelChangedReload' });

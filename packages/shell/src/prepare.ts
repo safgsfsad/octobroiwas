@@ -126,7 +126,8 @@ export function prepareApp(appId: AppId, distDir: string, opts: PrepareOptions =
 
 /** Accept-Language header matching the UI language. Same for all users of a language. */
 export function acceptLanguages(lang: 'en' | 'pl'): string {
-  return lang === 'pl' ? 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7' : 'en-US,en;q=0.9';
+  // Plain ordered list: Chromium generates the q-weights of the header itself.
+  return lang === 'pl' ? 'pl-PL,pl,en-US,en' : 'en-US,en';
 }
 
 /**

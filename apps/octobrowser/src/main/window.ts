@@ -12,6 +12,7 @@ import { BaseWindow, Menu, WebContentsView, WebContents, clipboard, shell } from
 import * as path from 'node:path';
 import { NORMALIZED_HARDWARE } from '@octo/core';
 import { trustWebContents } from '@octo/shell/ipc';
+import { pageConfigFingerprint } from './fingerprint-runtime';
 import { tabContents } from '@octo/shell/hardening';
 import { iconPath, THEME } from '@octo/shell/windows-ui';
 import { commandFor, Command } from '../shared/shortcuts';
@@ -220,8 +221,9 @@ export class BrowserWindowController {
       hwValues: { hardwareConcurrency: NORMALIZED_HARDWARE.hardwareConcurrency, deviceMemory: NORMALIZED_HARDWARE.deviceMemory },
       volume: t.volume / 100,
       sinkId: this.rt.profile.audio.outputDeviceId,
+      fp: this.rt.fp ? pageConfigFingerprint(this.rt.fp) : null,
     };
-    return `--octo-cfg=${Buffer.from(JSON.stringify(cfg)).toString('base64')}`;
+    return `--octo-cfg=${Buffer.from(JSON.stringify(cfg), 'utf8').toString('base64')}`;
   }
 
   private createView(t: Tab, adopt?: WebContents): void {
@@ -253,7 +255,7 @@ export class BrowserWindowController {
       setImmediate(() => this.onTabContentsDestroyed(t, view));
     });
     this.rt.onTabCreated?.(wc);
-    wc.setWebRTCIPHandlingPolicy(s.webrtc);
+    wc.setWebRTCIPHandlingPolicy(this.rt.fp?.enabled ? this.rt.fp.webrtcPolicy : s.webrtc);
     wc.setAudioMuted(t.muted || this.rt.profile.audio.muted);
     this.wireTab(t, wc);
     this.win.contentView.addChildView(view);

@@ -266,3 +266,37 @@ export function countryFlag(code?: string): string {
   if (!code || !/^[A-Za-z]{2}$/.test(code)) return '';
   return String.fromCodePoint(...code.toUpperCase().split('').map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
 }
+
+/** IP-info services used to check a proxy (tried in order). */
+export const IP_CHECK_URLS = [
+  'https://ipwho.is/',
+  'http://ip-api.com/json/?fields=status,message,country,countryCode,regionName,city,lat,lon,timezone,query',
+];
+
+/** Minimal fetch signature (Electron session.fetch / net.fetch / global fetch). */
+export type IpFetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+
+/**
+ * Check the exit IP by asking the IP-info services THROUGH the given fetch
+ * (which must be bound to the proxied session). Never throws.
+ */
+export async function checkExitIp(fetchFn: IpFetchLike, timeoutMs = 8000, urls = IP_CHECK_URLS): Promise<ProxyCheckResult> {
+  let lastError = 'no response';
+  for (const url of urls) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    const t0 = Date.now();
+    try {
+      const res = await fetchFn(url, { signal: ctl.signal });
+      if (!res.ok) { lastError = `HTTP ${res.status}`; continue; }
+      const r = normalizeIpInfo(await res.json(), Date.now() - t0);
+      if (r.ok) return r;
+      lastError = r.error ?? 'invalid response';
+    } catch (err) {
+      lastError = ctl.signal.aborted ? 'timeout' : (err as Error).message || String(err);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return { ok: false, at: new Date().toISOString(), error: lastError };
+}

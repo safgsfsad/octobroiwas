@@ -113,3 +113,23 @@ describe('ProxyStore', () => {
     expect(secrets.size).toBe(0);
   });
 });
+
+import { checkExitIp } from '../src/proxy';
+describe('checkExitIp', () => {
+  const ok = (json: unknown) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(json) });
+  it('returns the first successful service', async () => {
+    const r = await checkExitIp(() => ok({ ip: '109.243.144.229', success: true, country: 'Poland', country_code: 'PL', region: 'Mazovia', city: 'Warsaw', latitude: 52.2, longitude: 21, timezone: { id: 'Europe/Warsaw' } }));
+    expect(r).toMatchObject({ ok: true, ip: '109.243.144.229', countryCode: 'PL', timezone: 'Europe/Warsaw', city: 'Warsaw' });
+  });
+  it('falls back to the next service and reports errors', async () => {
+    let n = 0;
+    const r = await checkExitIp(() => (n++ === 0 ? Promise.reject(new Error('ECONNREFUSED')) : ok({ status: 'success', query: '1.2.3.4', countryCode: 'de', timezone: 'Europe/Berlin', lat: 1, lon: 2 })));
+    expect(r).toMatchObject({ ok: true, ip: '1.2.3.4', countryCode: 'DE', timezone: 'Europe/Berlin' });
+    const bad = await checkExitIp(() => Promise.reject(new Error('proxy auth failed')));
+    expect(bad).toMatchObject({ ok: false, error: 'proxy auth failed' });
+  });
+  it('times out', async () => {
+    const r = await checkExitIp((_u, init) => new Promise((_ok, fail) => init?.signal?.addEventListener('abort', () => fail(new Error('aborted')))), 50, ['https://x/']);
+    expect(r).toMatchObject({ ok: false, error: 'timeout' });
+  });
+});

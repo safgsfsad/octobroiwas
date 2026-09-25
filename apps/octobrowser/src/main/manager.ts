@@ -19,7 +19,13 @@ import {
   ADDONS, APPS, BootstrapStore, DICTS, DecryptionError, Profile, ProfileKind, ProfileManager, SUITE_VERSION, buildWsbConfig,
   describeIsolation, detectVpnAdapters, generateMnemonic, isValidMnemonic, wipe, fileStamp, SANDBOX_DATA_DIR, isLang, Lang,
   checkConsistency, effectiveSettings, PROFILE_KINDS, privateBrowsingPatch, privateBrowsingStamp, validateBaseDir,
+  ProxyStore, ParsedProxy, ProxyType, PROXY_TYPES, ProxyCheckResult, parseProxy, parseProxyList, checkExitIp, needsBridge,
+  generateFingerprint, setEngineVersion, engineVersion, FP_OSES, FingerprintOs, FingerprintConfig, fingerprintWarnings, gpuPresets, userAgentFor,
 } from '@octo/core';
+import { ProxyBridge } from '@octo/shell/proxy-bridge';
+import { randomBytes } from 'node:crypto';
+import * as net from 'node:net';
+import { ApiBackend, ApiError, ApiServer } from './api-server';
 import { AdblockService } from '@octo/shell/adblock';
 import { CHANNEL_FD, JsonLineChannel, channelStdio } from '@octo/shell/channel';
 import type { Duplex } from 'node:stream';
@@ -40,15 +46,24 @@ interface Child {
   killTimer?: NodeJS.Timeout;
 }
 
+/** Proxy chosen in the profile editor / sent to the API. */
+export type ProxyInput =
+  | { mode: 'none' }
+  | { mode: 'new'; text: string; type?: ProxyType; changeIpUrl?: string; name?: string; save?: boolean }
+  | { mode: 'saved'; savedId: string }
+  | { mode: 'keep' };
+
 /** Payload of `mgr:create`: name + kind, optionally a settings patch from the create dialog. */
 interface CreateInput {
   name: string;
   kind: ProfileKind;
   patch?: Partial<Omit<Profile, 'id' | 'createdAt' | 'updatedAt' | 'kind'>>;
+  proxy?: ProxyInput;
 }
 
 export class Manager {
   readonly profiles: ProfileManager;
+  readonly proxies: ProxyStore;
   private readonly updates: UpdateManager;
   private readonly adblock: AdblockService;
   private launcher: BrowserWindow | null = null;
@@ -56,10 +71,16 @@ export class Manager {
   /** Vault keys of OPEN encrypted profiles (wiped when sealed). */
   private readonly vaultKeys = new Map<string, Buffer>();
   private idleTimer: NodeJS.Timeout | null = null;
+  private api: ApiServer | null = null;
+  private apiError = '';
+  /** Remote-debugging ports of profiles started for automation. */
+  private readonly debugPorts = new Map<string, number>();
   private locking = false;
 
   constructor(private readonly ctx: AppContext) {
     this.profiles = new ProfileManager(ctx.layout, ctx.secrets);
+    this.proxies = new ProxyStore(ctx.layout, ctx.secrets);
+    setEngineVersion(process.versions.chrome);
     this.updates = new UpdateManager(APPS.octobrowser, ctx.layout, ctx.settings, ctx.logger, ctx.lang);
     this.adblock = new AdblockService(ctx.layout.filters, path.join(ctx.prep.distDir, 'assets', 'baseline-filters.txt'), ctx.logger);
   }
@@ -70,7 +91,8 @@ export class Manager {
 
   start(): void {
     const names = Object.fromEntries(PROFILE_KINDS.map((k) => [k, this.t(`profile.kind.${k}`)])) as Record<ProfileKind, string>;
-    this.profiles.ensureDefaults(names);
+    // First run: one ready-to-use antidetect profile (works like a normal browser).
+    this.profiles.ensureDefaults({ ...names, antidetect: `${this.t('profile.defaultName')} 1` }, ['antidetect']);
     // Profiles restored by restore-profile.bat whose entry had been deleted.
     const restored = this.profiles.adoptRestoredEntries();
     for (const p of restored.adopted) this.ctx.logger.info('profile.restored-entry-adopted', { profile: p.id });
@@ -88,6 +110,7 @@ export class Manager {
     this.updates.onAppLaunch();
     void this.maybeUpdateFilters();
     this.startAutoLock();
+    void this.applyApiSettings();
 
     const direct = this.profileFromArgv(process.argv);
     if (direct) void this.launch(direct, {});
@@ -170,6 +193,7 @@ export class Manager {
       needsResealing: this.profiles.needsResealing(p.id),
       issues: checkConsistency(effectiveSettings(p.protection), { extensionsCount: p.addons.length, proxyActive: p.network.mode === 'proxy' }),
       hasProxyCredentials: this.ctx.secrets.has(`proxy:${p.id}`),
+      fingerprintWarnings: fingerprintWarnings(p.fingerprint, engineVersion().major),
     }));
   }
 
@@ -188,7 +212,7 @@ export class Manager {
    * Start a profile. Returns a status the launcher UI reacts to
    * (passphrase needed, Tor Browser missing, Windows Sandbox unavailable...).
    */
-  async launch(id: string, opts: { passphrase?: string; forceRestricted?: boolean }): Promise<{ status: string; detail?: string }> {
+  async launch(id: string, opts: { passphrase?: string; forceRestricted?: boolean; debugPort?: number }): Promise<{ status: string; detail?: string }> {
     const p = this.profiles.get(id);
     const running = this.children.get(id);
     if (running) {
@@ -224,15 +248,20 @@ export class Manager {
       }
     }
 
-    this.spawnProfile(p);
+    this.spawnProfile(p, opts.debugPort);
     this.profiles.setLastUsed(id);
     this.pushProfiles();
     return { status: 'started' };
   }
 
-  private spawnProfile(p: Profile): void {
+  private spawnProfile(p: Profile, debugPort?: number): void {
     const args = app.isPackaged ? [] : [app.getAppPath()];
     args.push(`--profile-process=${p.id}`);
+    if (debugPort) {
+      // Automation (API): Chrome DevTools Protocol on loopback for Puppeteer / Playwright.
+      args.push(`--remote-debugging-port=${debugPort}`, '--remote-debugging-address=127.0.0.1');
+      this.debugPorts.set(p.id, debugPort);
+    } else this.debugPorts.delete(p.id);
     // Ephemeral session (Windows Sandbox / tests): there is no bootstrap.json, so the
     // child must get the same throw-away data folder and language as the manager.
     const st = this.ctx.prep.state;
@@ -255,6 +284,298 @@ export class Manager {
     channel.onMessage((m) => void this.onChildMessage(p.id, m));
     proc.on('exit', (code) => void this.onChildExit(p.id, code));
     this.ctx.logger.info('profile.spawned', { profile: p.id });
+  }
+
+  // ------------------------------------------------------ services (IPC + REST API)
+
+  /** Create a profile (name, kind, settings patch, optional proxy). */
+  createProfile(input: CreateInput): Profile {
+    if (!PROFILE_KINDS.includes(input.kind)) throw new Error('invalid kind');
+    const p = this.profiles.create({
+      name: String(input.name ?? '').trim().slice(0, 64) || `${this.t('profile.defaultName')} ${this.profiles.list().length + 1}`,
+      kind: input.kind,
+      patch: input.patch,
+    });
+    if (input.proxy && input.proxy.mode !== 'keep' && input.proxy.mode !== 'none') this.setProfileProxy(p.id, input.proxy);
+    this.pushProfiles();
+    return this.profiles.get(p.id);
+  }
+
+  /** Update profile settings (+ optional proxy change). Running profiles get the change live. */
+  updateProfile(id: string, patch: Partial<Profile>, proxy?: ProxyInput): Profile {
+    const clean = { ...patch } as Partial<Profile> & Record<string, unknown>;
+    for (const k of ['id', 'kind', 'createdAt', 'updatedAt', 'stats']) delete clean[k];
+    let updated = this.profiles.update(id, clean);
+    if (proxy && proxy.mode !== 'keep') updated = this.setProfileProxy(id, proxy);
+    this.children.get(id)?.channel.send({ t: 'profile-updated', profile: updated });
+    this.pushProfiles();
+    return updated;
+  }
+
+  removeProfile(id: string): void {
+    if (this.children.has(id)) throw new Error(this.t('err.closeProfileFirst'));
+    this.profiles.remove(id);
+    this.ctx.secrets.delete(`proxy:${id}`);
+    this.pushProfiles();
+  }
+
+  /** Resolve a proxy input to a parsed proxy (+ saved id). Throws with an i18n message. */
+  private resolveProxy(input: ProxyInput): { px: ParsedProxy; name: string; savedId: string } {
+    if (input.mode === 'saved') {
+      const sp = this.proxies.get(String(input.savedId));
+      return { px: this.proxies.resolve(sp.id), name: sp.name, savedId: sp.id };
+    }
+    if (input.mode !== 'new') throw new Error('invalid proxy mode');
+    const type = PROXY_TYPES.includes(input.type as ProxyType) ? (input.type as ProxyType) : 'http';
+    const r = parseProxy(String(input.text ?? ''), type);
+    if (!r.ok || !r.proxy) throw new Error(this.t(r.error ?? 'proxy.err.format'));
+    const px = { ...r.proxy, changeIpUrl: String(input.changeIpUrl ?? '').trim() || r.proxy.changeIpUrl };
+    if (px.changeIpUrl && !/^https?:\/\//i.test(px.changeIpUrl)) throw new Error(this.t('proxy.err.changeIpUrl'));
+    let savedId = '';
+    const name = String(input.name ?? '').trim().slice(0, 64);
+    if (input.save) savedId = this.proxies.add(px, name).id;
+    return { px, name, savedId };
+  }
+
+  /** Point a profile at a proxy (credentials go to the secret store only). */
+  setProfileProxy(id: string, input: ProxyInput): Profile {
+    const cur = this.profiles.get(id);
+    if (input.mode === 'keep') return cur;
+    if (input.mode === 'none') {
+      this.ctx.secrets.delete(`proxy:${id}`);
+      return this.profiles.update(id, { network: { ...cur.network, mode: 'direct', proxy: undefined, proxyRules: '', hasProxyCredentials: false }, proxyCheck: undefined });
+    }
+    const { px, name, savedId } = this.resolveProxy(input);
+    if (px.username || px.password) this.ctx.secrets.set(`proxy:${id}`, JSON.stringify({ username: px.username, password: px.password }));
+    else this.ctx.secrets.delete(`proxy:${id}`);
+    const lastCheck = savedId ? this.proxies.get(savedId).lastCheck : undefined;
+    return this.profiles.update(id, {
+      network: {
+        ...cur.network,
+        mode: 'proxy',
+        proxy: { type: px.type, host: px.host, port: px.port, changeIpUrl: px.changeIpUrl, name, savedId },
+        hasProxyCredentials: !!(px.username || px.password),
+      },
+      proxyCheck: lastCheck,
+    });
+  }
+
+  /**
+   * Check a proxy from the manager: a throw-away in-memory session routed through
+   * a local bridge (handles SOCKS5/SOCKS4/HTTP with credentials uniformly).
+   */
+  async checkProxy(px: ParsedProxy): Promise<ProxyCheckResult> {
+    if (px.type === 'https' && (px.username || px.password)) return { ok: false, at: new Date().toISOString(), error: this.t('proxy.err.httpsAuth') };
+    const ses = session.fromPartition(`octo-proxycheck-${Date.now()}-${randomBytes(4).toString('hex')}`);
+    const bridge = px.type === 'https' ? null : new ProxyBridge({ type: px.type, host: px.host, port: px.port, username: px.username, password: px.password });
+    try {
+      const rules = bridge ? (await bridge.start(), bridge.rules) : `https://${px.host}:${px.port}`;
+      await ses.setProxy({ mode: 'fixed_servers', proxyRules: rules });
+      const r = await checkExitIp((url, init) => ses.fetch(url, { cache: 'no-store', credentials: 'omit', signal: init?.signal } as RequestInit) as never);
+      if (!r.ok && bridge?.stats.lastError) r.error = bridge.stats.lastError;
+      this.ctx.logger.info('proxy.checked', { ok: r.ok, country: r.countryCode ?? '' });
+      return r;
+    } finally {
+      await bridge?.stop().catch(() => undefined);
+      void ses.clearStorageData().catch(() => undefined);
+    }
+  }
+
+  /** Check the proxy of a profile and store the result (used for "auto" timezone etc.). */
+  async checkProfileProxy(id: string): Promise<ProxyCheckResult> {
+    const p = this.profiles.get(id);
+    const px = p.network.mode === 'proxy' ? p.network.proxy : undefined;
+    if (!px) throw new Error(this.t('proxy.err.noProxy'));
+    let creds = { username: '', password: '' };
+    try { const raw = this.ctx.secrets.get(`proxy:${id}`); if (raw) creds = { ...creds, ...(JSON.parse(raw) as typeof creds) }; } catch { /* none */ }
+    const r = await this.checkProxy({ type: px.type, host: px.host, port: px.port, changeIpUrl: px.changeIpUrl, ...creds });
+    this.profiles.update(id, { proxyCheck: r });
+    if (px.savedId) { try { this.proxies.update(px.savedId, { lastCheck: r }); } catch { /* removed */ } }
+    this.pushProfiles();
+    return r;
+  }
+
+  async checkSavedProxy(id: string): Promise<ProxyCheckResult> {
+    const r = await this.checkProxy(this.proxies.resolve(id));
+    this.proxies.update(id, { lastCheck: r });
+    this.pushProxies();
+    return r;
+  }
+
+  /** Check a proxy typed in the editor (not stored yet). */
+  async checkProxyInput(input: ProxyInput): Promise<ProxyCheckResult> {
+    if (input.mode === 'saved') return this.checkSavedProxy(input.savedId);
+    if (input.mode !== 'new') throw new Error('invalid proxy mode');
+    const { px } = this.resolveProxy({ ...input, save: false });
+    return this.checkProxy(px);
+  }
+
+  /** Call the "change IP" URL of a rotating proxy. */
+  async changeProxyIp(url: string): Promise<{ ok: boolean; status: number }> {
+    if (!/^https?:\/\//i.test(url)) throw new Error(this.t('proxy.err.changeIpUrl'));
+    const res = await session.defaultSession.fetch(url, { cache: 'no-store', credentials: 'omit' } as RequestInit);
+    return { ok: res.ok, status: res.status };
+  }
+
+  /** Add saved proxies from pasted text (one per line, any supported format). */
+  addProxies(text: string, type: ProxyType = 'http', name = ''): { added: number; errors: Array<{ line: number; error: string }> } {
+    const list = parseProxyList(String(text ?? ''), PROXY_TYPES.includes(type) ? type : 'http');
+    let added = 0;
+    const errors: Array<{ line: number; error: string }> = [];
+    list.forEach((r, i) => {
+      if (r.ok && r.proxy) { this.proxies.add(r.proxy, list.length === 1 ? name : name ? `${name} ${i + 1}` : ''); added++; }
+      else errors.push({ line: r.line ?? i + 1, error: this.t(r.error ?? 'proxy.err.format') });
+    });
+    this.pushProxies();
+    return { added, errors };
+  }
+
+  pushProxies(): void {
+    this.launcher?.webContents.send('mgr:proxies', this.proxies.list());
+  }
+
+  /** New realistic fingerprint (optionally for a given OS). */
+  newFingerprint(os?: FingerprintOs): FingerprintConfig {
+    const { major, full } = engineVersion();
+    return generateFingerprint({ engineMajor: major, engineFullVersion: full, os: os && FP_OSES.includes(os) ? os : undefined });
+  }
+
+  /** Profile as returned by the API / launcher list (+ runtime state, no secrets). */
+  profileInfo(id: string) {
+    const item = this.profileList().find((p) => p.id === id);
+    if (!item) throw new Error(`Profile not found: ${id}`);
+    return item;
+  }
+
+  // ------------------------------------------------------------ REST API
+
+  private apiToken(): string {
+    let tok = this.ctx.secrets.get('api:token');
+    if (!tok) {
+      tok = randomBytes(24).toString('base64url');
+      this.ctx.secrets.set('api:token', tok);
+    }
+    return tok;
+  }
+
+  regenerateApiToken(): string {
+    this.ctx.secrets.set('api:token', randomBytes(24).toString('base64url'));
+    return this.apiToken();
+  }
+
+  apiStatus() {
+    const s = this.ctx.settings.load().api;
+    return { enabled: s.enabled, port: s.port, listening: !!this.api?.listening, token: this.apiToken(), error: this.apiError, baseUrl: `http://127.0.0.1:${s.port}/v1` };
+  }
+
+  /** Start / stop / move the API server to match the settings. */
+  async applyApiSettings(): Promise<void> {
+    const s = this.ctx.settings.load().api;
+    if (this.api && (!s.enabled || this.api.port !== s.port)) { await this.api.stop(); this.api = null; }
+    this.apiError = '';
+    if (s.enabled && !this.api) {
+      const srv = new ApiServer(this.apiBackend(), () => this.apiToken(), this.ctx.logger);
+      try { await srv.start(s.port); this.api = srv; } catch (err) {
+        this.apiError = (err as Error).message;
+        this.ctx.logger.warn('api.start-failed', { port: s.port, err: this.apiError });
+      }
+    }
+  }
+
+  private freePort(): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const srv = net.createServer();
+      srv.once('error', reject);
+      srv.listen(0, '127.0.0.1', () => { const port = (srv.address() as net.AddressInfo).port; srv.close(() => resolve(port)); });
+    });
+  }
+
+  private async wsEndpoint(port: number): Promise<string | undefined> {
+    for (let i = 0; i < 40; i++) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/json/version`);
+        if (res.ok) return ((await res.json()) as { webSocketDebuggerUrl?: string }).webSocketDebuggerUrl;
+      } catch { /* not up yet */ }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return undefined;
+  }
+
+  /** Adapter used by the REST API (same services as the launcher UI). */
+  private apiBackend(): ApiBackend {
+    const need = (id: string) => { if (!this.profiles.list().some((p) => p.id === id)) throw new ApiError(404, `profile not found: ${id}`); };
+    const pick = (body: Record<string, unknown>) => {
+      const { proxy, name, kind, os, ...rest } = body;
+      void name; void kind;
+      if (typeof os === 'string' && !rest.fingerprint) rest.fingerprint = this.newFingerprint(os as FingerprintOs);
+      return { patch: rest as Partial<Profile>, proxy: proxy as ProxyInput | undefined };
+    };
+    return {
+      version: SUITE_VERSION,
+      listProfiles: () => this.profileList(),
+      getProfile: (id) => { need(id); return this.profileInfo(id); },
+      createProfile: (body) => {
+        const { patch, proxy } = pick(body);
+        const kind = (typeof body.kind === 'string' ? body.kind : 'antidetect') as ProfileKind;
+        if (!PROFILE_KINDS.includes(kind)) throw new ApiError(400, `invalid kind (${PROFILE_KINDS.join(', ')})`);
+        const p = this.createProfile({ name: String(body.name ?? ''), kind, patch, proxy });
+        return this.profileInfo(p.id);
+      },
+      updateProfile: (id, body) => { need(id); const { patch, proxy } = pick(body); if (typeof body.name === 'string') patch.name = body.name; this.updateProfile(id, patch, proxy); return this.profileInfo(id); },
+      removeProfile: (id) => { need(id); this.removeProfile(id); },
+      startProfile: async (id, opts) => {
+        need(id);
+        if (this.children.has(id)) {
+          const port = this.debugPorts.get(id);
+          return { status: 'running', debugPort: port, wsEndpoint: port ? await this.wsEndpoint(port) : undefined };
+        }
+        const port = opts.debug ? await this.freePort() : undefined;
+        const r = await this.launch(id, { debugPort: port });
+        if (r.status !== 'started') return r;
+        return { ...r, debugPort: port, wsEndpoint: port ? await this.wsEndpoint(port) : undefined };
+      },
+      stopProfile: (id, force) => { need(id); return this.stop(id, force); },
+      regenerateFingerprint: (id, os) => {
+        need(id);
+        const cur = this.profiles.get(id).fingerprint;
+        const fresh = this.newFingerprint((os as FingerprintOs) || cur.os);
+        this.updateProfile(id, { fingerprint: { ...fresh, timezone: cur.timezone, language: cur.language, geolocation: cur.geolocation, webrtc: cur.webrtc } });
+        return this.profileInfo(id);
+      },
+      setProxy: (id, body) => { need(id); const p = this.setProfileProxy(id, body as unknown as ProxyInput); this.children.get(id)?.channel.send({ t: 'profile-updated', profile: p }); this.pushProfiles(); return this.profileInfo(id); },
+      checkProfileProxy: async (id) => { need(id); return { ...(await this.checkProfileProxy(id)) }; },
+      bulk: async (action, ids, arg) => {
+        const out: Record<string, unknown> = {};
+        for (const id of ids) {
+          try {
+            need(id);
+            if (action === 'start') out[id] = await this.launch(id, {});
+            else if (action === 'stop') out[id] = this.stop(id);
+            else if (action === 'remove') { this.removeProfile(id); out[id] = true; }
+            else if (action === 'folder') { this.updateProfile(id, { folder: String(arg ?? '') }); out[id] = true; }
+            else if (action === 'status') { this.updateProfile(id, { status: String(arg ?? '') } as Partial<Profile>); out[id] = true; }
+            else if (action === 'tags') { this.updateProfile(id, { tags: Array.isArray(arg) ? arg.map(String) : [] }); out[id] = true; }
+            else throw new ApiError(400, 'unknown action');
+          } catch (err) { out[id] = { error: (err as Error).message }; }
+        }
+        return out;
+      },
+      listProxies: () => this.proxies.list(),
+      addProxies: (text, type, name) => this.addProxies(text, type as ProxyType, name),
+      updateProxy: (id, body) => { const r = this.proxies.update(id, { name: typeof body.name === 'string' ? body.name : undefined, changeIpUrl: typeof body.changeIpUrl === 'string' ? body.changeIpUrl : undefined }); this.pushProxies(); return { ...r }; },
+      removeProxy: (id) => { this.proxies.get(id); this.proxies.remove(id); this.pushProxies(); },
+      checkSavedProxy: async (id) => ({ ...(await this.checkSavedProxy(id)) }),
+      parseProxy: (text, type) => {
+        const r = parseProxy(text, PROXY_TYPES.includes(type as ProxyType) ? (type as ProxyType) : 'http');
+        return r.ok && r.proxy ? { ok: true, format: r.format, proxy: { ...r.proxy, password: r.proxy.password ? '***' : '' } } : { ok: false, error: this.t(r.error ?? 'proxy.err.format') };
+      },
+      checkProxy: async (text, type) => ({ ...(await this.checkProxyInput({ mode: 'new', text, type: type as ProxyType })) }),
+      newFingerprint: (os) => ({ ...this.newFingerprint(os as FingerprintOs) }),
+      fingerprintMeta: (os) => {
+        const o = (FP_OSES.includes(os as FingerprintOs) ? os : 'windows11') as FingerprintOs;
+        return { os: o, gpus: gpuPresets(o), userAgent: userAgentFor(o, engineVersion().major), engine: engineVersion() };
+      },
+    };
   }
 
   /**
@@ -290,6 +611,7 @@ export class Manager {
   private async onChildExit(id: string, code: number | null): Promise<void> {
     const ended = this.children.get(id);
     if (ended?.killTimer) clearTimeout(ended.killTimer);
+    this.debugPorts.delete(id);
     this.children.delete(id);
     if (ended) {
       try {
@@ -354,6 +676,13 @@ export class Manager {
           if (typeof patch.offline === 'boolean') s.offline = patch.offline;
         });
         this.broadcast({ t: 'settings-updated' });
+        break;
+      }
+      case 'proxy-checked': {
+        const r = m.result as ProxyCheckResult | undefined;
+        if (m.id !== id || !r || typeof r !== 'object') return;
+        try { this.profiles.update(id, { proxyCheck: r }); } catch { /* deleted */ }
+        this.pushProfiles();
         break;
       }
       case 'check-updates':
@@ -521,14 +850,48 @@ export class Manager {
     handle('mgr:launch', L, (_e, id: string, opts: { passphrase?: string; forceRestricted?: boolean }) => this.launch(id, opts ?? {}));
     handle('mgr:create', L, (_e, a: string | CreateInput, kind?: ProfileKind) => {
       const input: CreateInput = typeof a === 'string' ? { name: a, kind: kind as ProfileKind } : a;
-      if (!PROFILE_KINDS.includes(input.kind)) throw new Error('invalid kind');
-      const p = this.profiles.create({
-        name: String(input.name ?? '').slice(0, 64) || this.t(`profile.kind.${input.kind}`),
-        kind: input.kind,
-        patch: input.patch,
+      return this.createProfile(input);
+    });
+    // ---- antidetect: proxies + fingerprints ----
+    handle('mgr:set-proxy', L, (_e, id: string, input: ProxyInput) => { const p = this.setProfileProxy(String(id), input); this.children.get(id)?.channel.send({ t: 'profile-updated', profile: p }); this.pushProfiles(); return p; });
+    handle('mgr:proxy-check', L, (_e, input: ProxyInput) => this.checkProxyInput(input));
+    handle('mgr:proxy-check-profile', L, (_e, id: string) => this.checkProfileProxy(String(id)));
+    handle('mgr:proxy-change-ip', L, (_e, url: string) => this.changeProxyIp(String(url)));
+    handle('mgr:proxies', L, () => this.proxies.list());
+    handle('mgr:proxies-add', L, (_e, text: string, type: ProxyType, name?: string) => this.addProxies(text, type, name ?? ''));
+    handle('mgr:proxies-update', L, (_e, id: string, patch: { name?: string; changeIpUrl?: string }) => { const r = this.proxies.update(String(id), { name: patch?.name, changeIpUrl: patch?.changeIpUrl }); this.pushProxies(); return r; });
+    handle('mgr:proxies-remove', L, (_e, ids: string[]) => { for (const id of ([] as string[]).concat(ids)) this.proxies.remove(String(id)); this.pushProxies(); return true; });
+    handle('mgr:proxies-check', L, (_e, id: string) => this.checkSavedProxy(String(id)));
+    handle('mgr:api-status', L, () => this.apiStatus());
+    handle('mgr:api-set', L, async (_e, patch: { enabled?: boolean; port?: number }) => {
+      ctx.settings.update((s) => {
+        if (typeof patch?.enabled === 'boolean') s.api.enabled = patch.enabled;
+        if (Number.isInteger(patch?.port) && patch.port! >= 1024 && patch.port! <= 65535) s.api.port = patch.port!;
       });
+      await this.applyApiSettings();
+      return this.apiStatus();
+    });
+    handle('mgr:api-token', L, () => { this.regenerateApiToken(); return this.apiStatus(); });
+    handle('mgr:fingerprint-new', L, (_e, os?: FingerprintOs) => this.newFingerprint(os));
+    handle('mgr:fingerprint-meta', L, (_e, os: FingerprintOs) => ({
+      gpus: gpuPresets(FP_OSES.includes(os) ? os : 'windows11'),
+      userAgent: userAgentFor(FP_OSES.includes(os) ? os : 'windows11', engineVersion().major),
+      engine: engineVersion(),
+    }));
+    handle('mgr:profile-bulk', L, async (_e, action: 'start' | 'stop' | 'remove' | 'folder' | 'status' | 'tags', ids: string[], arg?: unknown) => {
+      const out: Record<string, unknown> = {};
+      for (const id of ([] as string[]).concat(ids).map(String)) {
+        try {
+          if (action === 'start') out[id] = await this.launch(id, {});
+          else if (action === 'stop') out[id] = this.stop(id);
+          else if (action === 'remove') { this.removeProfile(id); out[id] = true; }
+          else if (action === 'folder') out[id] = !!this.updateProfile(id, { folder: String(arg ?? '').slice(0, 48) });
+          else if (action === 'status') out[id] = !!this.updateProfile(id, { status: String(arg ?? '').slice(0, 32) } as Partial<Profile>);
+          else if (action === 'tags') out[id] = !!this.updateProfile(id, { tags: Array.isArray(arg) ? arg.map(String) : [] });
+        } catch (err) { out[id] = { error: (err as Error).message }; }
+      }
       this.pushProfiles();
-      return p;
+      return out;
     });
     // Private browsing: one throw-away temporary profile, started right away.
     handle('mgr:private-browse', L, () => {
@@ -547,9 +910,8 @@ export class Manager {
       if (proxyUsername || proxyPassword) {
         ctx.secrets.set(`proxy:${id}`, JSON.stringify({ username: proxyUsername ?? '', password: proxyPassword ?? '' }));
       }
-      const updated = this.profiles.update(id, { ...rest, network: { ...(rest.network ?? this.profiles.get(id).network), hasProxyCredentials: ctx.secrets.has(`proxy:${id}`) } });
-      this.children.get(id)?.channel.send({ t: 'profile-updated', profile: updated });
-      this.pushProfiles();
+      const { proxy, ...fields } = rest as typeof rest & { proxy?: ProxyInput };
+      const updated = this.updateProfile(id, { ...fields, network: { ...(fields.network ?? this.profiles.get(id).network), hasProxyCredentials: ctx.secrets.has(`proxy:${id}`) } }, proxy);
       return updated;
     });
     handle('mgr:duplicate', L, (_e, id: string, name: string, withData: boolean) => {
@@ -558,12 +920,7 @@ export class Manager {
       this.pushProfiles();
       return p;
     });
-    handle('mgr:remove', L, (_e, id: string) => {
-      if (this.children.has(id)) throw new Error(this.t('err.closeProfileFirst'));
-      this.profiles.remove(id);
-      this.pushProfiles();
-      return true;
-    });
+    handle('mgr:remove', L, (_e, id: string) => { this.removeProfile(String(id)); return true; });
     handle('mgr:reset', L, (_e, id: string) => {
       if (this.children.has(id)) throw new Error(this.t('err.closeProfileFirst'));
       this.profiles.reset(id);
