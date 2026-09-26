@@ -14,7 +14,7 @@ import { closeApp, dumpLogs, invoke, launchApp, listFiles, Launched, waitFor, wi
 interface ProfileRow {
   id: string; name: string; kind: string; running: boolean; ready: boolean; encrypted: boolean;
   protection: { level: string; overrides?: Record<string, unknown> };
-  keepHistory: boolean; deleteOnClose: boolean;
+  keepHistory: boolean; deleteOnClose: boolean; pendingCookies?: boolean;
 }
 
 let l: Launched;
@@ -39,7 +39,9 @@ test('launcher opens in Polish with the default profiles', async () => {
   expect(init.keyringMode).toBe('os'); // ephemeral sessions use DPAPI
   expect(await l.app.evaluate(({ app }) => app.getVersion())).toBe(init.version);
   const profiles = await invoke<ProfileRow[]>(win, 'mgr:profiles');
-  expect(profiles.map((p) => p.kind).sort()).toEqual(['personal', 'private', 'temporary', 'testing', 'tor', 'work']);
+  // A fresh install starts with one Antidetect profile (level "normal": sites work like in plain Chrome).
+  expect(profiles.map((p) => p.kind)).toEqual(['antidetect']);
+  expect(profiles[0].protection.level).toBe('normal');
   await expect(win.locator('html')).toHaveAttribute('lang', 'pl');
 });
 
@@ -98,6 +100,26 @@ test('a new profile starts in its own process', async () => {
     const list = await invoke<ProfileRow[]>(win, 'mgr:profiles');
     return !list.find((x) => x.id === created.id)?.running;
   }, 60_000, 'profile process to exit');
+});
+
+test('cookies: queued for a closed profile, applied at start, live import into a running one', async () => {
+  const win = await windowWithPage(l.app, 'launcher.html');
+  const exp = Math.floor(Date.now() / 1000) + 86400;
+  const cookies = JSON.stringify([{ name: 'e2e_sid', value: 'abc', domain: '.example.com', path: '/', secure: true, expirationDate: exp }]);
+  const created = await invoke<ProfileRow>(win, 'mgr:create', { name: 'E2E cookies', kind: 'antidetect', cookies });
+  let row = (await invoke<ProfileRow[]>(win, 'mgr:profiles')).find((x) => x.id === created.id)!;
+  expect(row.pendingCookies).toBe(true);
+  await expect(invoke(win, 'mgr:import-cookies', created.id, '[{')).rejects.toThrow();
+  expect((await invoke<{ status: string }>(win, 'mgr:launch', created.id, {})).status).toBe('started');
+  // The profile applies the queue at start and the manager drops it from the store.
+  row = await waitFor(async () => {
+    const p = (await invoke<ProfileRow[]>(win, 'mgr:profiles')).find((x) => x.id === created.id);
+    return p && p.ready && !p.pendingCookies ? p : null;
+  }, 120_000, 'queued cookies to be applied');
+  const live = await invoke<{ imported: number; applied: string }>(win, 'mgr:import-cookies', created.id, `.example.org\tTRUE\t/\tFALSE\t${exp}\tlive\t1`);
+  expect(live).toEqual({ imported: 1, applied: 'now' });
+  await invoke(win, 'mgr:close-profile', created.id);
+  await waitFor(async () => !(await invoke<ProfileRow[]>(win, 'mgr:profiles')).find((x) => x.id === created.id)?.running, 60_000, 'profile process to exit');
 });
 
 test('data folder layout and no plaintext secrets', async () => {
