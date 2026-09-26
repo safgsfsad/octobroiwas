@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- apps/octobrowser/src/renderer/launcher.html - profile manager / launcher of OctoBrowser.su. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <title>OctoBrowser.su</title>
+  <link rel="stylesheet" href="launcher.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="rail">
+      <nav id="nav"></nav>
+      <div id="sideFoot"></div>
+    </aside>
+    <aside id="side2" class="hidden"></aside>
+    <main><section id="view"></section></main>
+  </div>
+  <footer id="statusbar"></footer>
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-box" id="modalBox"></div></div>
+  <div id="toasts" aria-live="polite"></div>
+  <script src="launcher.js"></script>
+</body>
+</html>
