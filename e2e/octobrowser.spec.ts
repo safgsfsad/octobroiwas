@@ -6,7 +6,7 @@
  * creation, starting a profile process (data key over the private pipe),
  * data-folder layout and that no secrets end up in plain files or logs.
  */
-import { test, expect } from '@playwright/test';
+import { test, expect, Page } from '@playwright/test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { closeApp, dumpLogs, invoke, launchApp, listFiles, Launched, waitFor, windowWithPage } from './helpers';
@@ -31,6 +31,23 @@ test.afterEach(async ({}, testInfo) => {
 test.afterAll(async () => {
   if (l) await closeApp(l);
 });
+
+/**
+ * Wait until a profile process reports "ready". On timeout the error message (which
+ * CI shows as an annotation) carries the profile state and the tail of the app logs.
+ */
+async function waitReady(win: Page, id: string, timeoutMs = 120_000): Promise<ProfileRow> {
+  let last: ProfileRow | undefined;
+  try {
+    return await waitFor(async () => {
+      last = (await invoke<ProfileRow[]>(win, 'mgr:profiles')).find((x) => x.id === id);
+      return last && last.running && last.ready ? last : null;
+    }, timeoutMs, 'profile process to become ready');
+  } catch (err) {
+    const state = last ? JSON.stringify({ kind: last.kind, running: last.running, ready: last.ready, level: last.protection.level }) : 'profile missing';
+    throw new Error(`${(err as Error).message}\nstate: ${state}\n${dumpLogs(l.dataDir, 45)}`);
+  }
+}
 
 test('launcher opens in Polish with the default profiles', async () => {
   const win = await windowWithPage(l.app, 'launcher.html');
@@ -86,11 +103,7 @@ test('a new profile starts in its own process', async () => {
   expect(created.id).toMatch(/^[a-z0-9-]{3,64}$/);
   const r = await invoke<{ status: string }>(win, 'mgr:launch', created.id, {});
   expect(r.status).toBe('started');
-  const row = await waitFor(async () => {
-    const list = await invoke<ProfileRow[]>(win, 'mgr:profiles');
-    const p = list.find((x) => x.id === created.id);
-    return p && p.running && p.ready ? p : null;
-  }, 120_000, 'profile process to become ready');
+  const row = await waitReady(win, created.id);
   expect(row.name).toBe('E2E Łódź');
   // Its Chromium data lives only in its own folder.
   const engine = path.join(l.dataDir, 'OctoBrowser', 'profiles', created.id, 'engine');
@@ -112,15 +125,27 @@ test('cookies: queued for a closed profile, applied at start, live import into a
   await expect(invoke(win, 'mgr:import-cookies', created.id, '[{')).rejects.toThrow();
   expect((await invoke<{ status: string }>(win, 'mgr:launch', created.id, {})).status).toBe('started');
   // The profile applies the queue at start and the manager drops it from the store.
+  await waitReady(win, created.id);
   row = await waitFor(async () => {
     const p = (await invoke<ProfileRow[]>(win, 'mgr:profiles')).find((x) => x.id === created.id);
     return p && p.ready && !p.pendingCookies ? p : null;
-  }, 120_000, 'queued cookies to be applied');
+  }, 60_000, 'queued cookies to be applied');
   const live = await invoke<{ imported: number; applied: string }>(win, 'mgr:import-cookies', created.id, `.example.org\tTRUE\t/\tFALSE\t${exp}\tlive\t1`);
   expect(live).toEqual({ imported: 1, applied: 'now' });
   await invoke(win, 'mgr:close-profile', created.id);
   await waitFor(async () => !(await invoke<ProfileRow[]>(win, 'mgr:profiles')).find((x) => x.id === created.id)?.running, 60_000, 'profile process to exit');
 });
+
+for (const kind of ['personal', 'work', 'testing', 'private', 'temporary'] as const) {
+  test(`a ${kind} profile starts and closes`, async () => {
+    const win = await windowWithPage(l.app, 'launcher.html');
+    const created = await invoke<ProfileRow>(win, 'mgr:create', `E2E ${kind}`, kind);
+    expect((await invoke<{ status: string }>(win, 'mgr:launch', created.id, {})).status).toBe('started');
+    await waitReady(win, created.id);
+    await invoke(win, 'mgr:close-profile', created.id);
+    await waitFor(async () => !(await invoke<ProfileRow[]>(win, 'mgr:profiles')).find((x) => x.id === created.id)?.running, 60_000, 'profile process to exit');
+  });
+}
 
 test('data folder layout and no plaintext secrets', async () => {
   // The keyring is created during startup - wait until the launcher is up.
