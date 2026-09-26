@@ -49,6 +49,7 @@ Base URL: `http://127.0.0.1:35555/v1`
 | POST | `/profiles/:id/fingerprint` | `{ os? }` | profile with a new realistic fingerprint |
 | PUT | `/profiles/:id/proxy` | ProxyInput (below) | profile |
 | POST | `/profiles/:id/proxy/check` | | ProxyCheckResult |
+| POST | `/profiles/:id/cookies` | `{cookies}` - JSON array (EditThisCookie / Puppeteer / Playwright shape) or the text of a JSON / Netscape cookies.txt export | `{imported, applied: "now" \| "next-start"}` |
 | POST | `/profiles/bulk` | `{ action, ids: [...], arg? }` | action = `start`, `stop`, `remove`, `folder`, `status`, `tags` |
 
 * `kind`: `antidetect` (default), `personal`, `work`, `private`, `testing`,
@@ -59,6 +60,8 @@ Base URL: `http://127.0.0.1:35555/v1`
   fingerprint (UA, UA-CH, GPU, screen, CPU, memory).
 * `fingerprint`: you can also pass a full or partial `FingerprintConfig`
   object. It is sanitised server-side. See [antidetect.md](antidetect.md).
+
+`POST /profiles` and `PATCH /profiles/:id` also accept `cookies` (same format). Cookies of a closed profile are kept encrypted and written into its cookie jar at the next start; a running profile gets them immediately.
 
 ### ProxyInput
 
