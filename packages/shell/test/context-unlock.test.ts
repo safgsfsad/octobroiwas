@@ -113,6 +113,14 @@ vi.mock('electron', () => {
   };
 });
 
+// Elevation is decided per test, not by the machine: GitHub's Windows runners
+// run as Administrator, which made every startApp() here return null.
+const elevState = { elevated: false };
+vi.mock('../src/winutil', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/winutil')>()),
+  isElevated: async () => elevState.elevated,
+}));
+
 // Imported lazily (after the electron mock is registered) inside beforeAll,
 // because top-level await is not available with "module": "commonjs".
 type ContextModule = typeof import('../src/context');
@@ -214,6 +222,33 @@ describe('startApp with a stubbed Electron', () => {
     expect(ctx!.secretBackend()).toBe('local'); // Credential Manager needs Windows
     expect(createdWindows.length).toBe(0); // no unlock window was needed
     ctx!.keyring.lock();
+  });
+
+  it('elevated start: asks instead of refusing; "Quit" stops, "Continue anyway" opens', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'octo-ctx-'));
+    const dataDir = path.join(base, 'OctoBrowser');
+    const distDir = path.join(base, 'dist');
+    fs.mkdirSync(path.join(distDir, 'shared'), { recursive: true });
+    distDirForTest = distDir;
+    setTrustedRoot(distDir);
+    writeBootstrap(base, dataDir);
+    const prep = prepFor(dataDir, distDir);
+    prep.layout!.ensure(['downloads']);
+    await new Keyring(path.join(prep.layout!.config, 'keyring.bin'), fakeProtector()).create();
+
+    elevState.elevated = true;
+    try {
+      dialogState.answer = 1; // "Quit"
+      expect(await startApp(prep)).toBeNull();
+      dialogState.answer = 0; // "Continue anyway"
+      const ctx = await startApp(prep);
+      expect(ctx).not.toBeNull();
+      expect(ctx!.keyring.isUnlocked()).toBe(true);
+      ctx!.keyring.lock();
+    } finally {
+      elevState.elevated = false;
+      dialogState.answer = 2;
+    }
   });
 
   it('requires the master password and refuses a wrong one', async () => {

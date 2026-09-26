@@ -128,8 +128,8 @@ Root: HKA; Subkey: "Software\Classes\octobrowser\DefaultIcon"; ValueType: string
 Root: HKA; Subkey: "Software\Classes\octobrowser\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\OctoBrowser\OctoBrowser.su.exe"" ""%1"""; Tasks: protocol
 
 [Run]
-Filename: "{app}\OctoBrowser\OctoBrowser.su.exe"; Description: "{cm:LaunchBrowser}"; Flags: nowait postinstall skipifsilent unchecked
-Filename: "{app}\OctoDetect\OctoDetect.su.exe"; Description: "{cm:LaunchDetect}"; Flags: nowait postinstall skipifsilent unchecked
+Filename: "{app}\OctoBrowser\OctoBrowser.su.exe"; Description: "{cm:LaunchBrowser}"; Flags: nowait postinstall skipifsilent unchecked runasoriginaluser
+Filename: "{app}\OctoDetect\OctoDetect.su.exe"; Description: "{cm:LaunchDetect}"; Flags: nowait postinstall skipifsilent unchecked runasoriginaluser
 ; In-app updates run Setup with /SILENT /RELAUNCH=<app id>: start that app again afterwards.
 Filename: "{app}\OctoBrowser\OctoBrowser.su.exe"; Flags: nowait runasoriginaluser; Check: RelaunchRequested('octobrowser')
 Filename: "{app}\OctoDetect\OctoDetect.su.exe"; Flags: nowait runasoriginaluser; Check: RelaunchRequested('octodetect')

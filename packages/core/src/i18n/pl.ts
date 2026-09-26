@@ -27,7 +27,9 @@ export const pl: Record<string, string> = {
   // ---------------------------------------------------------------- błędy
   'err.closeProfileFirst': 'Najpierw zamknij ten profil – jego pliki są używane, gdy jest uruchomiony.',
   'err.elevated.title': 'Uruchomiono jako administrator',
-  'err.elevated.body': 'Ta aplikacja nie powinna działać z uprawnieniami administratora. Uruchom ją jako zwykły użytkownik – przeglądarka z podwyższonymi uprawnieniami zwiększa szkody, jakie może wyrządzić złośliwa strona.',
+  'err.elevated.body': 'Aplikacja działa z uprawnieniami administratora i nie udało się jej uruchomić ponownie jako zwykły użytkownik (prawdopodobnie Kontrola konta użytkownika jest wyłączona). Przeglądarka z podwyższonymi uprawnieniami zwiększa szkody, jakie może wyrządzić złośliwa strona. Możesz kontynuować, ale bezpieczniej jest uruchomić aplikację ze zwykłego konta.',
+  'err.elevated.continue': 'Uruchom mimo to',
+  'err.elevated.quit': 'Zamknij',
   'err.generic': 'Coś poszło nie tak: {message}',
   'err.keyring.title': 'Problem z ochroną klucza',
   'err.keyring.dpapiFailed': 'Windows nie mógł odszyfrować lokalnego klucza (DPAPI). Zwykle dzieje się tak po zresetowaniu konta Windows albo po skopiowaniu folderu danych z innego komputera.',

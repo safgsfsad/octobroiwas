@@ -20,7 +20,7 @@ import { PreparedApp, hasFlag } from './prepare';
 import { runFirstRun } from './firstrun';
 import { runMasterPasswordUnlock } from './unlock';
 import { recoverKeyring } from './keyring-recovery';
-import { isElevated } from './winutil';
+import { isElevated, relaunchUnelevated } from './winutil';
 
 export interface AppContext {
   prep: PreparedApp;
@@ -104,10 +104,28 @@ async function openKeyring(
 export async function startApp(prep: PreparedApp): Promise<AppContext | null> {
   const guessLangForErrors: Lang = prep.state?.language ?? (app.getLocale().startsWith('pl') ? 'pl' : 'en');
 
-  // Never run as Administrator (unless explicitly overridden for troubleshooting).
-  if ((await isElevated()) && !hasFlag('allow-elevated')) {
-    fatal(guessLangForErrors, 'err.elevated.title', 'err.elevated.body');
-    return null;
+  // Do not run as Administrator. Typical cause: "Start OctoBrowser" on the last
+  // page of an installer that ran elevated, or UAC switched off. First try to
+  // restart as the normal user; if that is impossible, let the user decide
+  // instead of refusing to start at all (the old hard error made the installed
+  // app unusable on machines without UAC).
+  if (!hasFlag('allow-elevated') && (await isElevated())) {
+    if (relaunchUnelevated(prep.info.id, app.getPath('exe'), app.isPackaged)) {
+      app.exit(0);
+      return null;
+    }
+    const L = guessLangForErrors;
+    const choice = dialog.showMessageBoxSync({
+      type: 'warning',
+      title: translate(L, 'err.elevated.title'),
+      message: translate(L, 'err.elevated.title'),
+      detail: translate(L, 'err.elevated.body'),
+      buttons: [translate(L, 'err.elevated.continue'), translate(L, 'err.elevated.quit')],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (choice !== 0) return null;
   }
 
   if (!prep.state || !prep.layout) {

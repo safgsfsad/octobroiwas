@@ -32,6 +32,31 @@ export async function isElevated(): Promise<boolean> {
   return /S-1-16-12288|S-1-16-16384/.test(stdout);
 }
 
+/**
+ * Restart the (packaged) app WITHOUT administrator rights: Explorer runs as the
+ * signed-in user at medium integrity, so `explorer.exe <exe>` starts a normal
+ * copy. A marker file stops a loop when Explorer itself is elevated (UAC off /
+ * built-in Administrator): the second elevated start within 30 s gives up.
+ * @returns true when a normal copy was started and this one should exit.
+ */
+export function relaunchUnelevated(appId: string, exe: string, packaged: boolean): boolean {
+  if (process.platform !== 'win32' || !packaged) return false; // dev: electron.exe needs the app path, Explorer cannot pass it
+  const marker = path.join(os.tmpdir(), `octo-deelevate-${appId}.txt`);
+  try {
+    const last = Number(fs.readFileSync(marker, 'utf8'));
+    if (Number.isFinite(last) && Date.now() - last < 30_000) return false;
+  } catch { /* no marker yet */ }
+  try {
+    fs.writeFileSync(marker, String(Date.now()));
+    const child = spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe'), [exe], { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', () => undefined);
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Windows Sandbox is available when WindowsSandbox.exe exists (feature enabled). */
 export function windowsSandboxAvailable(): boolean {
   if (process.platform !== 'win32') return false;

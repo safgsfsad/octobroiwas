@@ -28,7 +28,9 @@ export const en: Record<string, string> = {
   // ---------------------------------------------------------------- errors
   'err.closeProfileFirst': 'Close this profile first - its files are in use while it is running.',
   'err.elevated.title': 'Running as administrator',
-  'err.elevated.body': 'This app should not run with administrator rights. Please start it as a normal user; elevated browsers increase the damage a malicious page could do.',
+  'err.elevated.body': 'The app is running with administrator rights and could not restart as a normal user (User Account Control is probably turned off). An elevated browser increases the damage a malicious page could do. You can continue, but it is safer to start the app from a normal user account.',
+  'err.elevated.continue': 'Continue anyway',
+  'err.elevated.quit': 'Quit',
   'err.generic': 'Something went wrong: {message}',
   'err.keyring.title': 'Key protection problem',
   'err.keyring.dpapiFailed': 'Windows could not decrypt the local key (DPAPI). This normally happens after a Windows account reset, or when the data folder was copied from another PC.',
