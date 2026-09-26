@@ -133,6 +133,7 @@ jobs:
         if: steps.e2e.outcome == 'failure' || steps.pester.outcome == 'failure'
         shell: pwsh
         run: |
+          Write-Output "::error title=Test failures::E2E: ${{ steps.e2e.outcome }}, Pester: ${{ steps.pester.outcome }}"
           Write-Error "E2E: ${{ steps.e2e.outcome }}, Pester: ${{ steps.pester.outcome }} - see the steps above and the test-results artifact."
           exit 1
 

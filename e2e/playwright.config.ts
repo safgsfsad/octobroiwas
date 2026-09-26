@@ -23,6 +23,6 @@ export default defineConfig({
   globalTimeout: 25 * 60_000,
   expect: { timeout: 30_000 },
   retries: process.env.CI ? 1 : 0,
-  reporter: process.env.CI ? [['list'], ['junit', { outputFile: '../test-results/e2e-junit.xml' }]] : 'list',
+  reporter: process.env.CI ? [['list'], ['github'], ['junit', { outputFile: '../test-results/e2e-junit.xml' }]] : 'list',
   outputDir: '../test-results/e2e',
 });

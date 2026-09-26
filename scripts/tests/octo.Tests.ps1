@@ -95,8 +95,12 @@ Describe 'octo.ps1 static checks' {
   It 'only contacts the official GitHub repository' {
     $text = [System.IO.File]::ReadAllText($Octo)
     # Every https:// literal in the script must point at the official repo (or its API).
+    # Exception: the download pages of the prerequisites (Node.js, git). The script never
+    # requests them itself - they are only shown / opened in the browser after a confirmation.
+    $sites = @('https://nodejs.org/', 'https://git-scm.com/')
     foreach ($m in [regex]::Matches($text, 'https://[^\s\"'')]+')) {
       $u = $m.Value
+      if ($sites -contains $u) { continue }
       ($u -like 'https://github.com/$OfficialRepo*' -or $u -like 'https://api.github.com/repos/$OfficialRepo*' -or $u -like 'https://github.com/$($OfficialRepo)*') | Should -BeTrue -Because "unexpected URL: $u"
     }
   }
