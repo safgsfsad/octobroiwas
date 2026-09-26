@@ -2,12 +2,16 @@
 
 ## 1. Pierwsze uruchomienie
 
-Kreator pojawia się tylko raz: **język** (English/Polski), **folder danych** (domyślnie `Dokumenty\OctoSuite`; unikaj folderów synchronizowanych z chmurą dla profili szyfrowanych) oraz **ochrona klucza**:
+Ekran konfiguracji pojawia się tylko raz i zawiera wszystko na jednej stronie:
 
-* **Konto Windows (zalecane)** – klucz chroni DPAPI; brak dodatkowego hasła;
-* **Hasło główne** – wymagane przy starcie i po auto-blokadzie; nie da się go odzyskać.
+* **język**: Polski / English, przełącznik w prawym górnym rogu;
+* **folder danych**: domyślnie `Dokumenty\OctoSuite`, zmiana przez *Przeglądaj…*. Dla profili szyfrowanych unikaj folderów synchronizowanych z chmurą;
+* **automatyczne aktualizacje**: domyślnie włączone;
+* **sprawdzanie publicznego IP**: domyślnie wyłączone.
 
-Opcje prywatności: sprawdzanie publicznego IP (domyślnie wyłączone), automatyczne aktualizacje (domyślnie włączone).
+Klucz jest chroniony kontem Windows (DPAPI), więc nie trzeba wpisywać żadnego
+hasła. Hasło główne można dodać później w **Bezpieczeństwo → Ochrona klucza**.
+Jest ono wymagane przy starcie i po auto-blokadzie i nie da się go odzyskać.
 
 ## 2. Profile
 

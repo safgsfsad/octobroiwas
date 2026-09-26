@@ -5,10 +5,11 @@
  *   1. Language: English / Polski
  *   2. Data folder: where EVERYTHING is saved locally (profiles, settings,
  *      logs, backups, downloads). Default: Documents\OctoSuite.
- *   3. Security: HOW the local key is protected - either bound to this Windows
- *      account (DPAPI, nothing to type) or wrapped with an optional MASTER
- *      PASSWORD (Argon2id + AES-256-GCM) - plus privacy choices (public-IP
- *      lookup consent, automatic update checks).
+ *   3. Two options: automatic update checks and public-IP lookup consent.
+ * All on ONE screen. The local key is always bound to this Windows account
+ * (DPAPI, nothing to type); a master password can be added later in the
+ * launcher's Security page. Only when DPAPI is unavailable does the screen ask
+ * for a password, because the key could not be stored otherwise.
  * The wizard pre-fills language and folder from the sibling app if it was
  * already configured, but the user always confirms.
  *
@@ -50,7 +51,7 @@ export function runFirstRun(prep: PreparedApp, logger: Logger): Promise<boolean>
 
   return new Promise<boolean>((resolve) => {
     let finished = false;
-    const win: BrowserWindow = createUtilityWindow(prep.distDir, info.id, 'firstrun.html', { width: 820, height: 640 });
+    const win: BrowserWindow = createUtilityWindow(prep.distDir, info.id, 'firstrun.html', { width: 720, height: 600 });
 
     handle('setup:init', logger, () => ({
       app: info.id,

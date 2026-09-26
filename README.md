@@ -41,14 +41,16 @@ Szczegóły: [docs/build.md](docs/build.md), [docs/updates-and-release.md](docs/
 
 ## Pierwsze uruchomienie
 
-Przy pierwszym uruchomieniu **każdej** aplikacji pojawia się jednorazowy kreator:
+Przy pierwszym uruchomieniu **każdej** aplikacji pojawia się jeden prosty ekran:
 
-1. **Język** – English / Polski (pytanie pojawia się tylko raz; zmiana później w Ustawieniach),
-2. **Folder danych** – wybierasz, gdzie zapisywać wszystko (domyślnie `Dokumenty\OctoSuite`); dane są tylko lokalne,
-3. **Ochrona klucza** – klucz chroniony kontem Windows (DPAPI, bez hasła) **albo** opcjonalne hasło główne (Argon2id → AES-256-GCM); plus zgody: sprawdzanie publicznego IP (domyślnie **wyłączone**), automatyczne aktualizacje.
+* **język**: Polski / English, wybrany wstępnie według systemu;
+* **folder danych**: domyślnie `Dokumenty\OctoSuite`, dane są tylko lokalne;
+* **dwa przełączniki**: automatyczne aktualizacje (domyślnie włączone) i sprawdzanie publicznego IP (domyślnie **wyłączone**).
 
-Hasło główne jest opcjonalne i nigdzie nie jest zapisywane. Można je ustawić,
-zmienić lub usunąć później (Ustawienia → Bezpieczeństwo); zmiana hasła nie
+Klucz danych jest zawsze chroniony kontem Windows (DPAPI), bez pytań i bez
+hasła. Pola hasła pojawiają się tylko wtedy, gdy DPAPI jest niedostępne.
+Hasło główne (Argon2id → AES-256-GCM) jest opcjonalne i nigdzie nie jest
+zapisywane. Można je ustawić, zmienić lub usunąć później (Ustawienia → Bezpieczeństwo); zmiana hasła nie
 zmienia klucza danych, więc zaszyfrowane dane pozostają czytelne. Pełny opis:
 [docs/encryption.md](docs/encryption.md).
 

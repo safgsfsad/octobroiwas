@@ -77,10 +77,18 @@ ${rows.join('\n')}
 Filter lists are downloaded only when the user updates filters, from the official
 URLs above, and stored unmodified in the user's data folder.
 
+## Icons embedded in the UI
+
+| Set | Version | License | Source | File |
+|---|---|---|---|---|
+| Lucide (interface icons, \`packages/shell/renderer/icons.ts\`) | 1.48.0 | ISC | https://lucide.dev | lucide.LICENSE.txt |
+| Simple Icons (Apple and Linux OS glyphs) | 16.32.0 | CC0-1.0 | https://simpleicons.org | simple-icons.LICENSE.txt |
+
 ## OctoSuite artwork
 
-The logos and icons in \`branding/\` are original works created for OctoSuite and
-are covered by the project license (MPL-2.0).
+The application icons in \`branding/\` (window/taskbar/installer icon) are
+original works created for OctoSuite and are covered by the project license
+(MPL-2.0).
 `;
   fs.writeFileSync(path.join(outDir, 'THIRD-PARTY-NOTICES.md'), md);
   console.log(`licenses: ${pkgs.size} bundled packages -> licenses/`);

@@ -3,7 +3,6 @@
  * Same monochrome tokens as the rest of the suite (shared.css).
  */
 .unlock { display: flex; flex-direction: column; gap: var(--gap); padding: 26px 28px; height: 100%; }
-.unlock .logo { width: 44px; height: 44px; }
 .unlock h1 { font-size: 19px; margin: 0; }
 .unlock p { margin: 0; font-size: 13px; }
 .unlock form { display: flex; gap: 10px; align-items: center; }

@@ -1,5 +1,11 @@
 /**
- * packages/shell/renderer/firstrun.ts - logic of the one-time first-run wizard.
+ * packages/shell/renderer/firstrun.ts - logic of the one-screen first-run setup.
+ *
+ * One screen: language (pre-selected from the system / sibling app), data
+ * folder, automatic updates, public-IP lookup consent. The local key is
+ * always protected by the Windows account (DPAPI) - no questions asked. Only
+ * when DPAPI is unavailable does a (required) password field appear, because
+ * the key cannot be stored otherwise.
  */
 import { applyI18n, setDicts, setLang, t, Dicts } from './i18n-client';
 import { appParam, invoke } from './setup-api';
@@ -18,70 +24,72 @@ interface InitData {
 interface Validation { ok: boolean; errorKey?: string; dataDir?: string; existing: { exists: boolean } | null }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+const val = (id: string) => ($(id) as HTMLInputElement).value;
 
-let step = 1;
-let lang: 'en' | 'pl' | null = null;
+let init: InitData;
+let lang: 'en' | 'pl' = 'en';
 let validation: Validation | null = null;
 let busy = false;
+let needsPassword = false;
+
+function status(text: string, bad = false): void {
+  const el = $('globalErr');
+  el.textContent = text;
+  el.classList.toggle('bad', bad);
+}
 
 function render(): void {
-  for (let i = 1; i <= 3; i++) {
-    $(`step${i}`).hidden = i !== step;
-    const li = document.querySelector<HTMLElement>(`.steps li[data-step="${i}"]`)!;
-    li.classList.toggle('active', i === step);
-    li.classList.toggle('done', i < step);
-  }
-  $('back').style.visibility = step > 1 ? 'visible' : 'hidden';
-  $('next').textContent = step === 3 ? t('firstRun.finish') : t('common.next');
-  ($('next') as HTMLButtonElement).disabled = busy || (step === 1 && !lang) || (step === 2 && !validation?.ok);
-  $('masterBox').hidden = keyProtection() !== 'password';
-  $('masterErr').textContent = '';
-  document.querySelectorAll<HTMLButtonElement>('.lang').forEach((b) => b.classList.toggle('selected', b.dataset.lang === lang));
+  document.documentElement.lang = lang;
+  $('title').textContent = t('firstRun.simple.title', { product: init.productName.replace(/\.su$/i, '') });
+  document.querySelectorAll<HTMLButtonElement>('#langs button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.lang === lang)));
+  $('pwBox').hidden = !needsPassword;
+  ($('next') as HTMLButtonElement).disabled = busy || !validation?.ok;
+  ($('cancel') as HTMLButtonElement).disabled = busy;
+}
 
+function setLanguage(l: 'en' | 'pl'): void {
+  lang = l;
+  setLang(l);
+  applyI18n();
+  if (validation && !validation.ok) $('folderErr').textContent = t(validation.errorKey ?? 'firstRun.err.notWritable');
+  render();
 }
 
 async function validateFolder(): Promise<void> {
-  const dir = ($('baseDir') as HTMLInputElement).value.trim();
-  validation = await invoke<Validation>('setup:validate', dir).catch(() => null);
+  validation = await invoke<Validation>('setup:validate', val('baseDir').trim()).catch(() => null);
   $('folderErr').textContent = validation && !validation.ok ? t(validation.errorKey ?? 'firstRun.err.notWritable') : '';
   $('dataDir').textContent = validation?.dataDir ?? '—';
   $('existingNote').hidden = !validation?.existing?.exists;
   render();
 }
 
-/** Which key protection the user picked in step 3. */
-function keyProtection(): 'os' | 'password' {
-  return ($('keyPassword') as HTMLInputElement).checked ? 'password' : 'os';
-}
-
-/** Validate the master password pair (only used in "password" mode). */
-function checkMasterPassword(): string | null {
-  const a = ($('masterPw') as HTMLInputElement).value;
-  const b = ($('masterPw2') as HTMLInputElement).value;
-  if (a.length < 10) return t('firstRun.err.weakPassword');
-  if (a !== b) return t('firstRun.err.passwordMismatch');
+function passwordProblem(): string | null {
+  if (!needsPassword) return null;
+  if (val('masterPw').length < 10) return t('firstRun.err.weakPassword');
+  if (val('masterPw') !== val('masterPw2')) return t('firstRun.err.passwordMismatch');
   return null;
 }
 
 async function finish(): Promise<void> {
+  const problem = passwordProblem();
+  $('masterErr').textContent = problem ?? '';
+  if (problem) { ($('masterPw') as HTMLInputElement).focus(); return; }
   busy = true;
   render();
-  $('globalErr').textContent = t('firstRun.saving');
-  const mode = keyProtection();
-  const masterPassword = mode === 'password' ? ($('masterPw') as HTMLInputElement).value : undefined;
+  status(t('firstRun.saving'));
   try {
     await invoke('setup:finish', {
       language: lang,
-      baseDir: ($('baseDir') as HTMLInputElement).value.trim(),
+      baseDir: val('baseDir').trim(),
       publicIpLookup: ($('ipConsent') as HTMLInputElement).checked,
       autoUpdate: ($('autoUpdate') as HTMLInputElement).checked,
-      keyProtection: mode,
-      masterPassword,
+      keyProtection: needsPassword ? 'password' : 'os',
+      masterPassword: needsPassword ? val('masterPw') : undefined,
     });
-    $('globalErr').textContent = t('firstRun.restarting');
+    status(t('firstRun.restarting'));
   } catch (err) {
     const msg = (err as Error).message;
-    $('globalErr').textContent = msg.startsWith('firstRun.') ? t(msg) : msg.includes('Decryption') ? t('unlock.wrong') : msg;
+    status(msg.startsWith('firstRun.') ? t(msg) : msg, true);
     busy = false;
     render();
   }
@@ -89,29 +97,18 @@ async function finish(): Promise<void> {
 
 async function main(): Promise<void> {
   document.body.dataset.app = appParam();
-  const init = await invoke<InitData>('setup:init');
+  init = await invoke<InitData>('setup:init');
   setDicts(init.dicts);
-  setLang(init.langGuess);
-  lang = null; // user must actively choose, even when pre-selected
-  ($('logo') as HTMLImageElement).src = '../assets/logo.svg';
-  $('product').textContent = init.productName;
+  needsPassword = !init.dpapiAvailable;
   $('version').textContent = `v${init.version}`;
   ($('baseDir') as HTMLInputElement).value = init.suggestedBase;
-  $('dpapiWarn').hidden = init.dpapiAvailable;
-  document.querySelectorAll<HTMLButtonElement>('.lang').forEach((b) => {
-    if (b.dataset.lang === init.langGuess) b.focus();
-    b.addEventListener('click', () => {
-      lang = b.dataset.lang === 'pl' ? 'pl' : 'en';
-      setLang(lang);
-      applyI18n();
-      render();
-    });
-    b.addEventListener('dblclick', () => { if (lang) { step = 2; void validateFolder(); } });
-  });
-  applyI18n();
+  setLanguage(init.langGuess);
 
+  document.querySelectorAll<HTMLButtonElement>('#langs button').forEach((b) => {
+    b.addEventListener('click', () => setLanguage(b.dataset.lang === 'pl' ? 'pl' : 'en'));
+  });
   $('browse').addEventListener('click', async () => {
-    const dir = await invoke<string | null>('setup:browse', ($('baseDir') as HTMLInputElement).value);
+    const dir = await invoke<string | null>('setup:browse', val('baseDir'));
     if (dir) {
       ($('baseDir') as HTMLInputElement).value = dir;
       await validateFolder();
@@ -119,31 +116,17 @@ async function main(): Promise<void> {
   });
   let timer = 0;
   $('baseDir').addEventListener('input', () => {
+    ($('next') as HTMLButtonElement).disabled = true;
     window.clearTimeout(timer);
     timer = window.setTimeout(() => void validateFolder(), 300);
   });
-  for (const el of document.querySelectorAll<HTMLInputElement>('input[name=keyMode]')) {
-    el.addEventListener('change', () => {
-      $('masterBox').hidden = keyProtection() !== 'password';
-      if (keyProtection() === 'password') ($('masterPw') as HTMLInputElement).focus();
-      render();
-    });
-  }
-  $('back').addEventListener('click', () => { if (step > 1 && !busy) { step--; $('globalErr').textContent = ''; render(); } });
   $('cancel').addEventListener('click', () => void invoke('setup:quit'));
-  $('next').addEventListener('click', async () => {
-    $('globalErr').textContent = '';
-    if (step === 1 && lang) { step = 2; await validateFolder(); return; }
-    if (step === 2 && validation?.ok) { step = 3; render(); return; }
-    if (step === 3) {
-      if (keyProtection() === 'password') {
-        const problem = checkMasterPassword();
-        if (problem) { $('masterErr').textContent = problem; return; }
-      }
-      await finish();
-    }
+  $('next').addEventListener('click', () => { if (!busy && validation?.ok) void finish(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !(e.target instanceof HTMLButtonElement) && !(e.target instanceof HTMLInputElement && e.target.type === 'checkbox') && !busy && validation?.ok) void finish();
   });
-  render();
+  await validateFolder();
+  ($('next') as HTMLButtonElement).focus();
 }
 
 main().catch((err) => { document.body.textContent = String(err); });

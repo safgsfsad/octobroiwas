@@ -17,6 +17,7 @@ export function mockSource(mock) {
     },
     on: (ch, cb) => { (listeners[ch] ??= []).push(cb); return () => {}; },
   };
+  window.octoSetup = window.octo;
 }
 
 /** Helpers for scenario steps (run in the page). */
@@ -119,7 +120,24 @@ export function scenarios(core) {
     { name: 'browser-privacy', page: 'browser.html', mock: bmock(), width: 1280, height: 800, steps: [`new Promise((r) => setTimeout(r, 200))`, click('#stProtection')], check: overlapCheck },
     { name: 'browser-close', page: 'browser.html', mock: bmock(), width: 1280, height: 720, steps: [`new Promise((r) => setTimeout(r, 200))`, `window.octo.invoke('ui:close-request-sim')`], check: `(() => document.getElementById('closeveil').classList.contains('hidden') ? ['close veil not shown'] : [])()` },
   ];
+  const sinit = (extra = {}) => ({ app: 'octobrowser', productName: 'OctoBrowser.su', version: '0.1.0', langGuess: 'pl', suggestedBase: 'C:\\Users\\me\\Documents\\OctoSuite', siblingConfigured: false, dataSubdir: 'OctoBrowser', dpapiAvailable: true, dicts, ...extra });
+  const smock = (extra = {}, validate = 'const d = String(args[0] || ""); return d.length < 4 ? { ok: false, errorKey: "firstRun.err.notAbsolute", existing: null } : { ok: true, dataDir: d + "\\\\OctoBrowser", existing: { exists: false } };') => ({
+    state: {}, values: { 'setup:init': sinit(extra), 'setup:browse': 'D:\\Dane\\Octo', 'setup:finish': true }, handlers: { 'setup:validate': validate },
+  });
+  const finishCall = (check) => `(() => { const c = window.__mock.calls.find(([ch]) => ch === 'setup:finish'); if (!c) return ['setup:finish not called']; const a = c[1][0]; const p = []; ${check}; return p; })()`;
+  const sshots = [
+    { name: 'setup', page: 'shared/firstrun.html', query: '?app=octobrowser', mock: smock(), width: 720, height: 600, check: overlapCheck },
+    { name: 'setup-en', page: 'shared/firstrun.html', mock: smock(), width: 720, height: 600, steps: [clickText('#langs button', 'English')], check: `(() => { const p = ${overlapCheck}; if (!/Welcome/.test(document.getElementById('title').textContent)) p.push('title not English'); return p; })()` },
+    { name: 'setup-bad-folder', page: 'shared/firstrun.html', mock: smock(), width: 720, height: 600, steps: [type('#baseDir', 'C:'), 'new Promise((r) => setTimeout(r, 450))'], check: `(() => { const p = ${overlapCheck}; if (!document.getElementById('next').disabled) p.push('start enabled for a bad folder'); if (!document.getElementById('folderErr').textContent) p.push('no folder error'); return p; })()` },
+    { name: 'setup-browse', page: 'shared/firstrun.html', mock: smock(), width: 720, height: 600, steps: [click('#browse'), 'new Promise((r) => setTimeout(r, 200))'], check: `(() => document.getElementById('baseDir').value === 'D:\\\\Dane\\\\Octo' ? [] : ['browse did not fill the folder: ' + document.getElementById('baseDir').value])()` },
+    { name: 'setup-finish', page: 'shared/firstrun.html', mock: smock(), width: 720, height: 600, steps: [click('#ipConsent'), click('#next')], check: finishCall("if (a.keyProtection !== 'os') p.push('keyProtection ' + a.keyProtection); if (a.language !== 'pl') p.push('language ' + a.language); if (a.publicIpLookup !== true) p.push('ip consent lost'); if (a.autoUpdate !== true) p.push('autoUpdate lost'); if (a.masterPassword !== undefined) p.push('password sent')") },
+    { name: 'setup-nodpapi', page: 'shared/firstrun.html', mock: smock({ dpapiAvailable: false }), width: 720, height: 600, steps: [click('#next')], check: `(() => { const p = ${overlapCheck}; if (document.getElementById('pwBox').hidden) p.push('password box hidden without DPAPI'); if (window.__mock.calls.some(([c]) => c === 'setup:finish')) p.push('finished without password'); if (!document.getElementById('masterErr').textContent) p.push('no password error'); return p; })()` },
+    { name: 'setup-nodpapi-ok', page: 'shared/firstrun.html', mock: smock({ dpapiAvailable: false }), width: 720, height: 600, steps: [type('#masterPw', 'bardzo-dlugie-haslo'), type('#masterPw2', 'bardzo-dlugie-haslo'), click('#next')], check: finishCall("if (a.keyProtection !== 'password') p.push('keyProtection ' + a.keyProtection); if (a.masterPassword !== 'bardzo-dlugie-haslo') p.push('password not sent')") },
+    { name: 'unlock', page: 'shared/unlock.html', mock: { state: {}, values: { 'unlock:init': { app: 'octobrowser', productName: 'OctoBrowser.su', version: '0.1.0', lang: 'pl', dicts } } }, width: 520, height: 470, check: `(() => { const p = ${overlapCheck}; if (!document.getElementById('password').placeholder) p.push('password placeholder empty'); return p; })()` },
+    { name: 'setup-small', page: 'shared/firstrun.html', mock: smock({ dpapiAvailable: false }), width: 640, height: 480, check: overlapCheck },
+  ];
   return [
+    ...sshots,
     ...bshots,
     { name: 'launcher-profiles', page: 'launcher.html', mock: mock(), check: overlapCheck },
     { name: 'launcher-profiles-en', page: 'launcher.html', mock: mock('en'), check: overlapCheck },

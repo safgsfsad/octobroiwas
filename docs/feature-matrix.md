@@ -6,7 +6,7 @@ Stan weryfikacji: kod przechodzi `tsc` i 144 testy vitest, oba bundle budują si
 
 | # | Obszar | Stan | Uwagi |
 |---|---|---|---|
-| 1 | Branding: SVG, PNG 16–256, ICO, ikona instalatora | ✅ | oryginalne grafiki, osobne motywy obu aplikacji |
+| 1 | Branding: SVG, PNG 16–256, ICO, ikona instalatora | ✅ | oryginalne grafiki (ikona okna/paska zadań/instalatora); logo usunięte z interfejsu |
 | 2 | Porównanie i wybór technologii | ✅ | [technology-choice.md](technology-choice.md) |
 | 3 | Weryfikacja komponentów | ✅ | [components.md](components.md), `licenses\` |
 | 4 | Profile: 7 typów, osobne dane i procesy | ✅ | |
@@ -18,7 +18,7 @@ Stan weryfikacji: kod przechodzi `tsc` i 144 testy vitest, oba bundle budują si
 | 5 | Hasło główne (opcjonalne): ustawienie, zmiana, usunięcie, okno odblokowania | ✅ | Argon2id → AES-256-GCM; hasło nigdzie nie jest zapisywane; błędne hasło = brak dostępu, nie „pół” dostępu |
 | 5 | Windows Credential Manager jako magazyn sekretów | ✅ | opcjonalnie, domyślnie wyłączone; tylko nazwy w `credman-index.json` |
 | 5 | Auto-blokada (profil + klucz lokalny), kopie przed zmianą, wykrywanie uszkodzeń | ✅ | |
-| 5 | Ostrzeżenie o granicach szyfrowania (malware) | ✅ | w kreatorze, oknie hasła i ustawieniach |
+| 5 | Ostrzeżenie o granicach szyfrowania (malware) | ✅ | w oknie hasła i w Ustawieniach → Bezpieczeństwo |
 | 6 | Tryb ograniczony (kamera/mikrofon/USB/schowek) | ✅ | |
 | 6 | Windows Sandbox + podsumowanie przed startem | ✅ | wymaga Pro/Enterprise/Education; niesprawdzone na żywym systemie |
 | 6 | AppContainer | 🟡 | tylko piaskownica rendererów Chromium; brak pełnego AppContainer dla aplikacji |
@@ -41,9 +41,9 @@ Stan weryfikacji: kod przechodzi `tsc` i 144 testy vitest, oba bundle budują si
 | 15 | Updater: harmonogram, ręcznie, lista zmian, waga, odłożenie, kopia, SHA-256 + Ed25519 + Authenticode, oficjalne źródło, rollback | ✅ | wyłączony (fail-closed) do czasu `npm run keygen` |
 | 16 | UI OctoBrowser (PL/EN) | ✅ | |
 | 17 | UI OctoDetect z ekranem startowym (PL/EN) | ✅ | |
-| 17 | Ochrona klucza: DPAPI **albo** hasło główne | ✅ | wybór w kreatorze i w Ustawieniach; nieczytelny klucz jest kwarantannowany, nie blokuje startu |
+| 17 | Ochrona klucza: DPAPI **albo** hasło główne | ✅ | konfiguracja startowa zawsze używa DPAPI (bez pytań; pola hasła tylko gdy DPAPI niedostępne), hasło główne w Ustawieniach → Bezpieczeństwo; nieczytelny klucz jest kwarantannowany, nie blokuje startu |
 | — | Szyfrowanie i odzyskiwanie profilu 12-wyrazową frazą | ✅ | BIP-39 (`packages/core/src/mnemonic.ts`), fraza przy włączaniu szyfrowania, przy otwieraniu, eksporcie i imporcie profilu |
-| — | Interfejs w stylu zrzutów referencyjnych (Dolphin): grafit + niebieski akcent, tabela profili, przyciski START/STOP | ✅ | launcher i pasek przeglądarki: paleta znaczeniowa (niebieski / zielony OK / czerwony błąd / bursztynowy ostrzeżenie), każdy stan ma też ikonę lub napis; pozostałe ekrany monochromatyczne; test `ui-contrast.test.ts` pilnuje kontrastu i palety; zrzuty weryfikuje `tools/dev/ui-shots.mjs` (nakładanie się, przepełnienie, brak tłumaczeń) |
+| — | Interfejs w stylu zrzutów referencyjnych (Dolphin): grafit + niebieski akcent, tabela profili, przyciski START/STOP | ✅ | launcher i pasek przeglądarki: paleta znaczeniowa (niebieski / zielony OK / czerwony błąd / bursztynowy ostrzeżenie), każdy stan ma też ikonę lub napis; ekrany startowe (konfiguracja, odblokowanie, splash) w tej samej palecie, bez logo; ikony Lucide (ISC); test `ui-contrast.test.ts` pilnuje kontrastu i palety; zrzuty weryfikuje `tools/dev/ui-shots.mjs` (nakładanie się, przepełnienie, brak tłumaczeń) |
 | — | Pusty ekran startowy zamiast pustej listy profili | ✅ | przyciski „Przeglądanie prywatne” i „Nowy profil” na środku |
 | — | Przeglądanie prywatne (profil tymczasowy, jeden klik) | ✅ | poziom Ścisły, dane usuwane po zamknięciu; bez obietnic anonimowości |
 | — | Tworzenie profilu: zakładki + podsumowanie na żywo | ✅ | `mgr:create` przyjmuje nazwę, typ i poprawkę ustawień; test `profiles.test.ts` |

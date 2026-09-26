@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- packages/shell/renderer/firstrun.html - one-time first-run wizard (language, data folder, security). -->
+<!-- packages/shell/renderer/firstrun.html - one-time setup: one screen (language, data folder, two options). -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -9,109 +9,62 @@
   <link rel="stylesheet" href="firstrun.css">
 </head>
 <body>
-  <div class="wizard">
-    <aside class="rail">
-      <img class="logo" id="logo" alt="">
-      <div class="product" id="product"></div>
-      <ol class="steps">
-        <li data-step="1"><span>1</span><b data-i18n="firstRun.step.language"></b></li>
-        <li data-step="2"><span>2</span><b data-i18n="firstRun.step.folder"></b></li>
-        <li data-step="3"><span>3</span><b data-i18n="firstRun.step.security"></b></li>
-      </ol>
-      <div class="version muted" id="version"></div>
-    </aside>
-
-    <main>
-      <!-- STEP 1: language (bilingual heading on purpose) -->
-      <section class="step" id="step1">
-        <h1>Choose your language<br><span class="muted">Wybierz język</span></h1>
-        <p class="muted" data-i18n="firstRun.language.once"></p>
-        <div class="langs">
-          <button class="lang" data-lang="en"><span class="code">EN</span><span>English</span></button>
-          <button class="lang" data-lang="pl"><span class="code">PL</span><span>Polski</span></button>
+  <div class="setup">
+    <main class="setup-body">
+      <header class="setup-head">
+        <div class="head-text">
+          <h1 id="title"></h1>
+          <p class="muted" data-i18n="firstRun.simple.subtitle"></p>
         </div>
-      </section>
+        <div class="seg" id="langs" role="radiogroup" aria-label="Language / Język">
+          <button type="button" data-lang="pl" role="radio">Polski</button>
+          <button type="button" data-lang="en" role="radio">English</button>
+        </div>
+      </header>
 
-      <!-- STEP 2: data folder -->
-      <section class="step" id="step2" hidden>
-        <h1 data-i18n="firstRun.folder.title"></h1>
-        <p class="muted" data-i18n="firstRun.folder.desc"></p>
+      <section class="group">
+        <label class="lbl" for="baseDir" data-i18n="firstRun.folder.title"></label>
         <div class="row">
           <input type="text" id="baseDir" spellcheck="false">
-          <button class="btn" id="browse" data-i18n="firstRun.folder.browse"></button>
+          <button type="button" class="btn" id="browse" data-i18n="firstRun.folder.browse"></button>
         </div>
-        <div class="err" id="folderErr"></div>
-        <div class="info">
-          <div data-i18n="firstRun.folder.willCreate"></div>
-          <code id="dataDir"></code>
-          <ul class="tree muted">
-            <li>profiles\ — <span data-i18n="firstRun.folder.tree.profiles"></span></li>
-            <li>config\ — <span data-i18n="firstRun.folder.tree.config"></span></li>
-            <li>backups\ — <span data-i18n="firstRun.folder.tree.backups"></span></li>
-            <li>logs\ — <span data-i18n="firstRun.folder.tree.logs"></span></li>
-          </ul>
-        </div>
-        <div class="info" id="existingNote" hidden data-i18n="firstRun.folder.existing"></div>
-        <p class="muted small" data-i18n="firstRun.folder.localOnly"></p>
+        <div class="hint"><span data-i18n="firstRun.simple.savedIn"></span> <code id="dataDir">—</code></div>
+        <div class="err" id="folderErr" role="alert"></div>
+        <div class="hint ok-note" id="existingNote" hidden data-i18n="firstRun.folder.existing"></div>
       </section>
 
-      <!-- STEP 3: security & privacy -->
-      <section class="step" id="step3" hidden>
-        <h1 data-i18n="firstRun.security.title"></h1>
-
-        <div class="choice">
-          <label class="option">
-            <input type="radio" name="keyMode" id="keyOs" value="os" checked>
-            <span><b data-i18n="firstRun.security.local"></b>
-              <span class="muted" data-i18n="firstRun.security.localDesc"></span></span>
-          </label>
-          <label class="option">
-            <input type="radio" name="keyMode" id="keyPassword" value="password">
-            <span><b data-i18n="firstRun.security.master"></b>
-              <span class="muted" data-i18n="firstRun.security.masterDesc"></span></span>
-          </label>
+      <!-- Only when Windows DPAPI is unavailable: the key then needs a password. -->
+      <section class="group" id="pwBox" hidden>
+        <label class="lbl" for="masterPw" data-i18n="firstRun.simple.pwTitle"></label>
+        <div class="row">
+          <input type="password" id="masterPw" spellcheck="false" autocomplete="new-password" data-i18n-ph="firstRun.security.masterPlaceholder">
+          <input type="password" id="masterPw2" spellcheck="false" autocomplete="new-password" data-i18n-ph="firstRun.security.masterRepeat">
         </div>
-
-        <div id="masterBox" hidden>
-          <div class="row">
-            <input type="password" id="masterPw" spellcheck="false" autocomplete="new-password"
-                   data-i18n-placeholder="firstRun.security.masterPlaceholder">
-            <input type="password" id="masterPw2" spellcheck="false" autocomplete="new-password"
-                   data-i18n-placeholder="firstRun.security.masterRepeat">
-          </div>
-          <div class="err" id="masterErr"></div>
-          <div class="muted small" data-i18n="firstRun.security.masterHint"></div>
-        </div>
-
-        <div class="fact">
-          <svg class="ico" aria-hidden="true"><use href="#i-list"></use></svg>
-          <div><b data-i18n="firstRun.security.profiles"></b><div class="muted" data-i18n="firstRun.security.profilesDesc"></div></div>
-        </div>
-        <div class="err" id="dpapiWarn" hidden data-i18n="firstRun.err.noDpapi"></div>
-        <div class="muted small" data-i18n="firstRun.security.hint"></div>
-        <label class="check"><input type="checkbox" id="ipConsent"> <span data-i18n="firstRun.privacy.publicIp"></span></label>
-        <label class="check"><input type="checkbox" id="autoUpdate" checked> <span data-i18n="firstRun.privacy.updates"></span></label>
-        <div class="note" data-i18n="security.malwareNotice"></div>
+        <div class="err" id="masterErr" role="alert"></div>
+        <div class="hint" data-i18n="firstRun.security.masterHint"></div>
       </section>
 
-      <div class="err" id="globalErr"></div>
-      <footer>
-        <button class="btn" id="back" data-i18n="common.back"></button>
-        <span class="spacer"></span>
-        <button class="btn" id="cancel" data-i18n="common.cancel"></button>
-        <button class="btn primary" id="next" data-i18n="common.next"></button>
-      </footer>
+      <section class="opts">
+        <label class="opt">
+          <span class="opt-text"><b data-i18n="firstRun.simple.updates"></b><small class="muted" data-i18n="firstRun.simple.updatesDesc"></small></span>
+          <input type="checkbox" class="switch" id="autoUpdate" checked>
+        </label>
+        <label class="opt">
+          <span class="opt-text"><b data-i18n="firstRun.simple.ip"></b><small class="muted" data-i18n="firstRun.simple.ipDesc"></small></span>
+          <input type="checkbox" class="switch" id="ipConsent">
+        </label>
+      </section>
+
+      <p class="hint" data-i18n="firstRun.simple.local"></p>
     </main>
+
+    <footer class="setup-foot">
+      <span class="status" id="globalErr" role="status"></span>
+      <span class="version" id="version"></span>
+      <button type="button" class="btn" id="cancel" data-i18n="common.cancel"></button>
+      <button type="button" class="btn primary" id="next" data-i18n="firstRun.simple.start"></button>
+    </footer>
   </div>
-  <!-- Inline icon sprite: no network, no external files. -->
-  <svg hidden aria-hidden="true">
-    <symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="8" cy="15" r="4"/><path d="M11 12 20 3M17 6l2 2M15 8l2 2"/>
-    </symbol>
-    <symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M4 6h16M4 12h16M4 18h10"/>
-    </symbol>
-  </svg>
   <script src="firstrun.js"></script>
 </body>
 </html>

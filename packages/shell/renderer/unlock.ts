@@ -57,7 +57,6 @@ async function main(): Promise<void> {
   setLang(init.lang);
   applyI18n();
   document.title = `${t('unlock.title')} — ${init.productName}`;
-  ($('logo') as HTMLImageElement).src = '../assets/logo.svg';
 
   $('form').addEventListener('submit', (e) => { e.preventDefault(); void submit(); });
   $('cancel').addEventListener('click', () => void invoke('unlock:cancel'));

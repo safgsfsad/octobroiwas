@@ -10,8 +10,8 @@ import { trustWebContents } from './ipc';
 import type { AppId } from '@octo/core';
 
 export const THEME = {
-  octobrowser: { bg: '#0b1020', accent: '#7c5cff' },
-  octodetect: { bg: '#07161a', accent: '#14b8a6' },
+  octobrowser: { bg: '#1b1b1d', accent: '#2d8cf0' },
+  octodetect: { bg: '#1b1b1d', accent: '#2d8cf0' },
 } as const;
 
 export function iconPath(distDir: string): string {
@@ -23,6 +23,8 @@ export function createUtilityWindow(distDir: string, appId: AppId, page: string,
   const win = new BrowserWindow({
     width: opts.width,
     height: opts.height,
+    // Size is the page area (title bar excluded), so the layout is identical at every DPI scale.
+    useContentSize: true,
     frame: opts.frame ?? true,
     resizable: opts.resizable ?? false,
     show: false,

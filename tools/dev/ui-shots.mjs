@@ -38,7 +38,7 @@ try {
     page.on('pageerror', (e) => errors.push(`${sc.name}: ${e.message}`));
     page.on('console', (m) => { if (m.type() === 'error') errors.push(`${sc.name}: console: ${m.text()}`); });
     await page.evaluateOnNewDocument(mockSource, sc.mock);
-    await page.goto(pathToFileURL(path.join(dist, 'renderer', sc.page)).href);
+    await page.goto(pathToFileURL(path.join(dist, sc.page.includes('/') ? sc.page : path.join('renderer', sc.page))).href + (sc.query ?? ''));
     await new Promise((r) => setTimeout(r, 400));
     for (const step of sc.steps ?? []) {
       await page.evaluate(step);

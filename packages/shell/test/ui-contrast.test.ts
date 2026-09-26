@@ -124,12 +124,16 @@ describe('renderer stylesheets', () => {
 
   it('uses only the documented palette (no stray brand hues)', () => {
     // The launcher and the browser chrome follow the Dolphin-style reference
-    // screenshots: graphite surfaces plus four semantic hue families - blue
+    // screenshots (as do the start-up screens): graphite surfaces plus four semantic hue families - blue
     // accent, green OK/START, red error/STOP and amber warning (the Linux OS
     // glyph is amber too). Every other stylesheet stays black and white.
     // Colour is never the only carrier of meaning: each state also has an
     // icon or a label, which the contrast test above keeps readable.
-    const PALETTE_FILES = new Set(['apps/octobrowser/src/renderer/launcher.css', 'apps/octobrowser/src/renderer/browser.css']);
+    const PALETTE_FILES = new Set([
+      'apps/octobrowser/src/renderer/launcher.css', 'apps/octobrowser/src/renderer/browser.css',
+      // start-up screens (setup, unlock, splash) share the launcher palette via shared.css
+      'packages/shell/renderer/shared.css', 'packages/shell/renderer/firstrun.css', 'packages/shell/renderer/unlock.css', 'packages/shell/renderer/splash.css',
+    ]);
     const FAMILIES: Array<[number, number]> = [[195, 232], [115, 150], [345, 360], [0, 12], [30, 52]];
     const ALLOWED = new Set(['#b91c1c']); // "force close (may lose data)" hint
     const hueOf = ([r, g, b]: [number, number, number]): number => {
