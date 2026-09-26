@@ -19,6 +19,7 @@ export * from './profiles';
 export * from './fingerprint';
 export * from './proxy';
 export * from './proxystore';
+export * from './cookies';
 export * from './updater';
 export * from './addons';
 export * from './network';

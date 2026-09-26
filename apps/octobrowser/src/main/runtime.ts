@@ -20,7 +20,7 @@ import {
   ADDONS, AppSettings, Bookmark, DICTS, DataLayout, Lang, Logger, Profile, ProfileData, ProfileManager, SecretStore,
   VersionedStore, checkConsistency, createSettingsStore, detectVpnAdapters, dohTemplate, assessDns, parseTrace, t as translate,
   SUITE_VERSION, searchEngineQueryUrl, wipe, ResolvedFingerprint, resolveFingerprint, setEngineVersion, needsBridge, checkExitIp,
-  ProxyCheckResult, GeoInfo,
+  ProxyCheckResult, GeoInfo, ImportedCookie, MAX_COOKIES,
 } from '@octo/core';
 import { ProxyBridge } from '@octo/shell/proxy-bridge';
 import { FingerprintEmulator, fingerprintHeaders } from './fingerprint-runtime';
@@ -131,6 +131,9 @@ export class ProfileRuntime {
         cb();
       }
     });
+
+    // Cookies imported in the launcher while the profile was closed.
+    await this.applyQueuedCookies();
 
     this.registerIpc();
     this.channel.onMessage((m) => void this.onManagerMessage(m));
@@ -548,6 +551,37 @@ export class ProfileRuntime {
     });
   }
 
+  // ------------------------------------------------------------- cookies
+
+  private async applyQueuedCookies(): Promise<void> {
+    let list: ImportedCookie[] = [];
+    try { list = JSON.parse(this.secrets.get(`cookies:${this.profile.id}`) ?? '[]') as ImportedCookie[]; } catch { list = []; }
+    if (!Array.isArray(list) || !list.length) return;
+    const r = await this.setCookies(list);
+    this.channel.send({ t: 'cookies-imported', fromQueue: true, ...r });
+  }
+
+  private async setCookies(list: ImportedCookie[]): Promise<{ ok: number; failed: number }> {
+    const ses = session.defaultSession;
+    let ok = 0;
+    let failed = 0;
+    for (const c of list.slice(0, MAX_COOKIES)) {
+      if (!c || typeof c.url !== 'string' || typeof c.name !== 'string') { failed++; continue; }
+      try {
+        await ses.cookies.set({
+          url: c.url, name: c.name, value: String(c.value ?? ''), domain: c.domain, path: c.path, secure: !!c.secure,
+          httpOnly: !!c.httpOnly, expirationDate: c.expirationDate, sameSite: c.sameSite,
+        });
+        ok++;
+      } catch (err) {
+        failed++;
+        if (failed <= 3) this.logger.warn('cookies.set-failed', { name: c.name, err: String((err as Error)?.message ?? err) });
+      }
+    }
+    try { await ses.cookies.flushStore(); } catch { /* ignore */ }
+    return { ok, failed };
+  }
+
   // ------------------------------------------------------------- manager messages
 
   private async onManagerMessage(m: Message): Promise<void> {
@@ -563,6 +597,12 @@ export class ProfileRuntime {
         for (const w of this.windows.values()) w.applyProfileAudio();
         this.pushAll();
         if (levelChanged) for (const w of this.windows.values()) w.send('ui:toast', { key: 'toast.levelChangedReload' });
+        break;
+      }
+      case 'import-cookies': {
+        const r = await this.setCookies(Array.isArray(m.cookies) ? (m.cookies as ImportedCookie[]) : []);
+        this.channel.send({ t: 'cookies-imported', fromQueue: false, ...r });
+        for (const w of this.windows.values()) w.send('ui:toast', { key: 'cookies.imported', params: { n: String(r.ok) } });
         break;
       }
       case 'settings-updated':

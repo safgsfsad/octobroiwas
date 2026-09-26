@@ -371,3 +371,20 @@ button.in-btn:hover:not(:disabled) { color: var(--accent-h); background: var(--p
   .frow { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .frow-l { padding-top: 0; }
 }
+
+/* ---- cookies + mass import (create/edit dialog) ---- */
+.ck-ed { display: flex; flex-direction: column; gap: 10px; }
+.ck-text { min-height: 96px; max-height: 260px; }
+.ck-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.ck-status.ok { color: #9fe8b3; } .ck-status.bad { color: #ffb4b4; }
+.chips-unit { gap: 10px; } .chips-unit .unit { color: var(--muted); font-size: 13px; }
+.mass-text { min-height: 170px; }
+.mass-sum { display: flex; gap: 8px; flex-wrap: wrap; }
+.mass-rows { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--radius); max-height: 280px; overflow: auto; }
+.mass-row { display: grid; grid-template-columns: 44px minmax(120px, 1fr) minmax(0, 2fr); gap: 12px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.mass-row:last-child { border-bottom: 0; }
+.mass-row .mr-n { color: var(--muted); font-variant-numeric: tabular-nums; }
+.mass-row .mr-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mass-row .mr-proxy { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.mass-row.bad .mr-proxy { color: #ffb4b4; font-family: inherit; }
+.ed-tabs button { display: inline-flex; align-items: center; gap: 6px; }

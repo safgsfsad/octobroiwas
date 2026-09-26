@@ -19,7 +19,7 @@ import {
   ADDONS, APPS, BootstrapStore, DICTS, DecryptionError, Profile, ProfileKind, ProfileManager, SUITE_VERSION, buildWsbConfig,
   describeIsolation, detectVpnAdapters, generateMnemonic, isValidMnemonic, wipe, fileStamp, SANDBOX_DATA_DIR, isLang, Lang,
   checkConsistency, effectiveSettings, PROFILE_KINDS, privateBrowsingPatch, privateBrowsingStamp, validateBaseDir,
-  ProxyStore, ParsedProxy, ProxyType, PROXY_TYPES, ProxyCheckResult, parseProxy, parseProxyList, checkExitIp, needsBridge,
+  ProxyStore, ParsedProxy, ProxyType, PROXY_TYPES, ProxyCheckResult, parseProxy, parseProxyList, parseCookies, ImportedCookie, MAX_COOKIES, checkExitIp, needsBridge,
   generateFingerprint, setEngineVersion, engineVersion, FP_OSES, FingerprintOs, FingerprintConfig, fingerprintWarnings, gpuPresets, userAgentFor,
 } from '@octo/core';
 import { ProxyBridge } from '@octo/shell/proxy-bridge';
@@ -59,6 +59,8 @@ interface CreateInput {
   kind: ProfileKind;
   patch?: Partial<Omit<Profile, 'id' | 'createdAt' | 'updatedAt' | 'kind'>>;
   proxy?: ProxyInput;
+  /** Exported cookies (JSON or Netscape cookies.txt) to import into the new profile. */
+  cookies?: string;
 }
 
 export class Manager {
@@ -193,6 +195,7 @@ export class Manager {
       needsResealing: this.profiles.needsResealing(p.id),
       issues: checkConsistency(effectiveSettings(p.protection), { extensionsCount: p.addons.length, proxyActive: p.network.mode === 'proxy' }),
       hasProxyCredentials: this.ctx.secrets.has(`proxy:${p.id}`),
+      pendingCookies: this.ctx.secrets.has(`cookies:${p.id}`),
       fingerprintWarnings: fingerprintWarnings(p.fingerprint, engineVersion().major),
     }));
   }
@@ -291,14 +294,52 @@ export class Manager {
   /** Create a profile (name, kind, settings patch, optional proxy). */
   createProfile(input: CreateInput): Profile {
     if (!PROFILE_KINDS.includes(input.kind)) throw new Error('invalid kind');
+    const cookies = input.cookies ? this.parseCookiesOrThrow(input.cookies) : null; // validate BEFORE creating
     const p = this.profiles.create({
       name: String(input.name ?? '').trim().slice(0, 64) || `${this.t('profile.defaultName')} ${this.profiles.list().length + 1}`,
       kind: input.kind,
       patch: input.patch,
     });
     if (input.proxy && input.proxy.mode !== 'keep' && input.proxy.mode !== 'none') this.setProfileProxy(p.id, input.proxy);
+    if (cookies?.length) this.queueCookies(p.id, cookies);
     this.pushProfiles();
     return this.profiles.get(p.id);
+  }
+
+  private parseCookiesOrThrow(text: unknown): ImportedCookie[] {
+    const r = parseCookies(typeof text === 'string' ? text : JSON.stringify(text ?? ''));
+    if (!r.ok) throw new Error(this.t(r.error ?? 'cookies.err.format'));
+    return r.cookies;
+  }
+
+  /**
+   * Import cookies into a profile. A running profile gets them immediately;
+   * otherwise they wait (encrypted, in the secret store) for the next start.
+   */
+  importCookies(id: string, text: unknown): { imported: number; applied: 'now' | 'next-start' } {
+    this.profiles.get(id); // throws if unknown
+    const list = this.parseCookiesOrThrow(text);
+    const child = this.children.get(id);
+    if (child?.ready) {
+      child.channel.send({ t: 'import-cookies', cookies: list });
+      return { imported: list.length, applied: 'now' };
+    }
+    this.queueCookies(id, list);
+    return { imported: list.length, applied: 'next-start' };
+  }
+
+  private queueCookies(id: string, list: ImportedCookie[]): void {
+    const key = `cookies:${id}`;
+    let pending: ImportedCookie[] = [];
+    try { pending = JSON.parse(this.ctx.secrets.get(key) ?? '[]') as ImportedCookie[]; } catch { pending = []; }
+    const byKey = new Map<string, ImportedCookie>();
+    for (const c of [...pending, ...list]) byKey.set(`${c.name}\u0000${c.domain ?? c.url}\u0000${c.path}`, c); // later import wins
+    this.ctx.secrets.set(key, JSON.stringify([...byKey.values()].slice(-MAX_COOKIES)));
+  }
+
+  /** Number of cookies waiting for the next start of the profile. */
+  pendingCookies(id: string): number {
+    try { return (JSON.parse(this.ctx.secrets.get(`cookies:${id}`) ?? '[]') as unknown[]).length; } catch { return 0; }
   }
 
   /** Update profile settings (+ optional proxy change). Running profiles get the change live. */
@@ -316,6 +357,7 @@ export class Manager {
     if (this.children.has(id)) throw new Error(this.t('err.closeProfileFirst'));
     this.profiles.remove(id);
     this.ctx.secrets.delete(`proxy:${id}`);
+    this.ctx.secrets.delete(`cookies:${id}`);
     this.pushProfiles();
   }
 
@@ -505,8 +547,8 @@ export class Manager {
   private apiBackend(): ApiBackend {
     const need = (id: string) => { if (!this.profiles.list().some((p) => p.id === id)) throw new ApiError(404, `profile not found: ${id}`); };
     const pick = (body: Record<string, unknown>) => {
-      const { proxy, name, kind, os, ...rest } = body;
-      void name; void kind;
+      const { proxy, name, kind, os, cookies, ...rest } = body;
+      void name; void kind; void cookies;
       if (typeof os === 'string' && !rest.fingerprint) rest.fingerprint = this.newFingerprint(os as FingerprintOs);
       return { patch: rest as Partial<Profile>, proxy: proxy as ProxyInput | undefined };
     };
@@ -518,10 +560,19 @@ export class Manager {
         const { patch, proxy } = pick(body);
         const kind = (typeof body.kind === 'string' ? body.kind : 'antidetect') as ProfileKind;
         if (!PROFILE_KINDS.includes(kind)) throw new ApiError(400, `invalid kind (${PROFILE_KINDS.join(', ')})`);
-        const p = this.createProfile({ name: String(body.name ?? ''), kind, patch, proxy });
+        const cookies = body.cookies === undefined ? undefined : typeof body.cookies === 'string' ? body.cookies : JSON.stringify(body.cookies);
+        const p = this.createProfile({ name: String(body.name ?? ''), kind, patch, proxy, cookies });
         return this.profileInfo(p.id);
       },
-      updateProfile: (id, body) => { need(id); const { patch, proxy } = pick(body); if (typeof body.name === 'string') patch.name = body.name; this.updateProfile(id, patch, proxy); return this.profileInfo(id); },
+      updateProfile: (id, body) => {
+        need(id);
+        const { patch, proxy } = pick(body);
+        if (typeof body.name === 'string') patch.name = body.name;
+        if (body.cookies !== undefined) this.importCookies(id, body.cookies);
+        this.updateProfile(id, patch, proxy);
+        return this.profileInfo(id);
+      },
+      importCookies: (id, cookies) => { need(id); return this.importCookies(id, cookies); },
       removeProfile: (id) => { need(id); this.removeProfile(id); },
       startProfile: async (id, opts) => {
         need(id);
@@ -655,6 +706,11 @@ export class Manager {
         break;
       case 'open-launcher':
         this.showLauncher();
+        break;
+      case 'cookies-imported':
+        // The profile applied the queued cookies at start: drop them from the store.
+        if (m.fromQueue === true) this.ctx.secrets.delete(`cookies:${id}`);
+        this.ctx.logger.info('profile.cookies-imported', { profile: id, ok: Number(m.ok ?? 0), failed: Number(m.failed ?? 0) });
         break;
       case 'update-profile': {
         if (m.id !== id) return; // a profile may only edit itself
@@ -853,6 +909,8 @@ export class Manager {
       return this.createProfile(input);
     });
     // ---- antidetect: proxies + fingerprints ----
+    handle('mgr:import-cookies', L, (_e, id: string, text: string) => this.importCookies(String(id), String(text ?? '')));
+    handle('mgr:parse-cookies', L, (_e, text: string) => { const r = parseCookies(String(text ?? '')); return { ok: r.ok, count: r.cookies.length, skipped: r.skipped, format: r.format, error: r.error ? this.t(r.error) : undefined }; });
     handle('mgr:set-proxy', L, (_e, id: string, input: ProxyInput) => { const p = this.setProfileProxy(String(id), input); this.children.get(id)?.channel.send({ t: 'profile-updated', profile: p }); this.pushProfiles(); return p; });
     handle('mgr:proxy-check', L, (_e, input: ProxyInput) => this.checkProxyInput(input));
     handle('mgr:proxy-check-profile', L, (_e, id: string) => this.checkProfileProxy(String(id)));
@@ -910,7 +968,8 @@ export class Manager {
       if (proxyUsername || proxyPassword) {
         ctx.secrets.set(`proxy:${id}`, JSON.stringify({ username: proxyUsername ?? '', password: proxyPassword ?? '' }));
       }
-      const { proxy, ...fields } = rest as typeof rest & { proxy?: ProxyInput };
+      const { proxy, cookies, ...fields } = rest as typeof rest & { proxy?: ProxyInput; cookies?: string };
+      if (cookies) this.importCookies(id, cookies);
       const updated = this.updateProfile(id, { ...fields, network: { ...(fields.network ?? this.profiles.get(id).network), hasProxyCredentials: ctx.secrets.has(`proxy:${id}`) } }, proxy);
       return updated;
     });

@@ -44,7 +44,7 @@ export interface Profile {
   proxyCheck?: ProxyCheck; stats: { launches: number; lastLaunchAt: string; worktimeSec: number };
   // runtime info from the manager
   running: boolean; ready: boolean; stopping: boolean; startedAt: number; sealed: boolean; hasVault: boolean; needsResealing: boolean;
-  issues: Array<{ key: string; severity: string }>; hasProxyCredentials: boolean; fingerprintWarnings: string[];
+  issues: Array<{ key: string; severity: string }>; hasProxyCredentials: boolean; pendingCookies?: boolean; fingerprintWarnings: string[];
 }
 export interface SavedProxy { id: string; name: string; type: ProxyType; host: string; port: number; hasCredentials: boolean; changeIpUrl: string; createdAt: string; lastCheck?: ProxyCheck }
 export interface AddonInfo { id: string; name: string; description: { en: string; pl: string }; version: string; license: string; permissions: Array<{ en: string; pl: string }>; source: string; kind: string; status: string; integrity: { en: string; pl: string } }

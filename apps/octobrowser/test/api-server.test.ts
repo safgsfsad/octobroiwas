@@ -22,6 +22,7 @@ function fakeBackend() {
     regenerateFingerprint: (id, os) => { need(id); return { id, os }; },
     setProxy: (id, body) => { need(id); return { id, proxy: body }; },
     checkProfileProxy: async (id) => { need(id); return { ok: true, ip: '1.2.3.4' }; },
+    importCookies: (id, cookies) => { need(id); calls.push(`cookies:${id}:${Array.isArray(cookies) ? cookies.length : typeof cookies}`); return { imported: 1, applied: 'next-start' }; },
     bulk: async (action, ids) => Object.fromEntries(ids.map((i) => [i, action])),
     listProxies: () => [],
     addProxies: (text) => ({ added: text.split('\n').length, errors: [] }),
@@ -98,6 +99,14 @@ describe('ApiServer', () => {
     expect((await call('POST', '/v1/profiles/p1/proxy/check')).json.ip).toBe('1.2.3.4');
     expect((await call('POST', '/v1/profiles/bulk', { action: 'stop', ids: ['p1'] })).json).toEqual({ p1: 'stop' });
     expect((await call('POST', '/v1/profiles/bulk', { action: 'stop', ids: [] })).status).toBe(400);
+  });
+
+  it('cookie import (JSON array or text)', async () => {
+    const r = await call('POST', '/v1/profiles/p1/cookies', { cookies: [{ name: 'a', value: 'b', domain: '.x.com' }] });
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ imported: 1, applied: 'next-start' });
+    expect(fb.calls).toContain('cookies:p1:1');
+    expect((await call('POST', '/v1/profiles/nope/cookies', { cookies: '' })).status).toBe(404);
   });
 
   it('proxies + fingerprints', async () => {

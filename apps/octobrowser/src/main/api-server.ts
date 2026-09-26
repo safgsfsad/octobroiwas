@@ -47,6 +47,7 @@ export interface ApiBackend {
   regenerateFingerprint(id: string, os?: string): Record<string, unknown>;
   setProxy(id: string, body: Record<string, unknown>): Record<string, unknown>;
   checkProfileProxy(id: string): Promise<Record<string, unknown>>;
+  importCookies(id: string, cookies: unknown): Record<string, unknown>;
   bulk(action: string, ids: string[], arg: unknown): Promise<Record<string, unknown>>;
   listProxies(): unknown[];
   addProxies(text: string, type: string, name: string): Record<string, unknown>;
@@ -59,7 +60,7 @@ export interface ApiBackend {
   fingerprintMeta(os: string): Record<string, unknown>;
 }
 
-const MAX_BODY = 1024 * 1024;
+const MAX_BODY = 10 * 1024 * 1024; // cookie imports can be a few MB
 
 function tokenMatches(given: string, expected: string): boolean {
   const a = Buffer.from(given);
@@ -125,6 +126,7 @@ export class ApiServer {
     this.route('POST', '/v1/profiles/([\\w-]+)/stop', ({ params, body }) => ({ ok: b.stopProfile(params[0], body.force === true) }));
     this.route('POST', '/v1/profiles/([\\w-]+)/fingerprint', ({ params, body }) => b.regenerateFingerprint(params[0], str(body.os) || undefined));
     this.route('PUT', '/v1/profiles/([\\w-]+)/proxy', ({ params, body }) => b.setProxy(params[0], body));
+    this.route('POST', '/v1/profiles/([\\w-]+)/cookies', ({ params, body }) => b.importCookies(params[0], body.cookies));
     this.route('POST', '/v1/profiles/([\\w-]+)/proxy/check', ({ params }) => b.checkProfileProxy(params[0]));
     this.route('GET', '/v1/proxies', () => b.listProxies());
     this.route('POST', '/v1/proxies/parse', ({ body }) => b.parseProxy(str(body.text), str(body.type) || 'http'));

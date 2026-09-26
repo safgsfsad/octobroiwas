@@ -33,6 +33,8 @@ interface Draft {
   homePage: string; theme: 'dark' | 'light'; keepHistory: boolean; restoreSession: boolean; deleteOnClose: boolean;
   protection: { level: Level; overrides: Record<string, unknown> }; dns: Profile['dns']; sandbox: Sandbox; addons: string[];
   fp: Fingerprint | null; proxy: ProxyDraft;
+  /** Exported cookies to import (JSON / Netscape), empty = none. */
+  cookies: string;
 }
 
 const ANTI_ADDONS = ['audio-mixer'];
@@ -62,6 +64,7 @@ function newDraft(): Draft {
     ...kindDefaults('antidetect', S.init.addons.filter((a) => a.kind !== 'external-app').map((a) => a.id)),
     fp: null,
     proxy: { mode: 'none', type: 'http', text: '', changeIpUrl: '', name: '', save: false, savedId: '', keep: false },
+    cookies: '',
   };
 }
 
@@ -78,7 +81,7 @@ function draftFrom(p: Profile): Draft {
     name: c.name, kind: c.kind, status: c.status ?? '', tags: c.tags ?? [], folder: c.folder ?? '', notes: c.notes ?? '', startPages: c.startPages ?? [],
     homePage: c.homePage === 'octo://newtab' ? '' : c.homePage, theme: c.theme, keepHistory: c.keepHistory, restoreSession: c.restoreSession, deleteOnClose: c.deleteOnClose,
     protection: { level: c.protection.level, overrides: c.protection.overrides ?? {} }, dns: c.dns, sandbox: c.sandbox, addons: c.addons,
-    fp: c.fingerprint?.enabled ? c.fingerprint : c.kind === 'antidetect' ? c.fingerprint : null, proxy,
+    fp: c.fingerprint?.enabled ? c.fingerprint : c.kind === 'antidetect' ? c.fingerprint : null, proxy, cookies: '',
   };
 }
 
@@ -129,13 +132,14 @@ const ENGINE_OVERRIDES: Array<{ key: string; type: 'enum'; values: string[] }> =
 
 // ------------------------------------------------------------------ dialog
 
-type Tab = 'general' | 'advanced' | 'browser' | 'notes';
+type Tab = 'general' | 'advanced' | 'browser' | 'notes' | 'mass';
 
 export function openEditor(p: Profile | null): void {
   const d = p ? draftFrom(p) : newDraft();
   const creating = !p;
   let tab: Tab = 'general';
   let busy = false;
+  const mass: MassDraft = { text: '', os: 'windows11', type: 'http', prefix: '' };
 
   modal(creating ? t('ui.createProfile') : t('profile.editTitle', { name: p!.name }), (box) => {
     const tabs = h('div', { class: 'tabs ed-tabs', role: 'tablist' });
@@ -147,8 +151,9 @@ export function openEditor(p: Profile | null): void {
     const draw = () => {
       clear(tabs);
       const TABS: Array<[Tab, string]> = [['general', 'edit.tab.general'], ['advanced', 'ui.tab.advanced'], ['browser', 'ui.tab.browser'], ['notes', 'ui.tab.notes']];
+      if (creating) TABS.push(['mass', 'mass.tab']);
       for (const [k, key] of TABS) {
-        const b = h('button', { class: k === tab ? 'on' : '', role: 'tab', 'aria-selected': String(k === tab), text: t(key) });
+        const b = h('button', { class: k === tab ? 'on' : '', role: 'tab', 'aria-selected': String(k === tab) }, k === 'mass' ? icon('import', 15) : null, h('span', { text: t(key) }));
         b.onclick = () => { tab = k; draw(); };
         tabs.append(b);
       }
@@ -157,6 +162,8 @@ export function openEditor(p: Profile | null): void {
       if (tab === 'advanced') advanced(main, d, draw, summary);
       if (tab === 'browser') browser(main, d, draw, summary);
       if (tab === 'notes') notes(main, d);
+      if (tab === 'mass') massImport(main, mass, d, () => setSaveLabel());
+      setSaveLabel();
       main.scrollTop = 0;
       summary();
     };
@@ -173,9 +180,24 @@ export function openEditor(p: Profile | null): void {
     const cancel = h('button', { class: 'btn', text: t('common.cancel') });
     cancel.onclick = closeModal;
     const save = h('button', { class: 'btn primary upper' }, icon('check', 16), h('span', { text: creating ? t('ui.createProfile') : t('common.save') })) as HTMLButtonElement;
+    const saveLabel = save.querySelector('span')!;
+    const setSaveLabel = () => {
+      const n = tab === 'mass' ? massLines(mass).filter((l) => !l.error).length : 0;
+      saveLabel.textContent = tab === 'mass' ? t('mass.createN', { n }) : creating ? t('ui.createProfile') : t('common.save');
+      save.disabled = busy || (tab === 'mass' && n === 0);
+    };
     save.onclick = async () => {
       if (busy) return;
       err.textContent = '';
+      if (tab === 'mass') {
+        busy = true;
+        const r = await runMassImport(mass, d, (done, total) => { saveLabel.textContent = t('mass.progress', { done, total }); });
+        busy = false;
+        setSaveLabel();
+        if (r.created) { closeModal(); toast(t('mass.done', { n: r.created }), 'ok'); }
+        if (r.errors.length) { toast(t('mass.failedN', { n: r.errors.length }), 'err'); if (!r.created) err.textContent = r.errors[0]; }
+        return;
+      }
       const proxy = proxyInput(d.proxy);
       if (typeof proxy === 'string') { err.textContent = proxy; tab = 'general'; draw(); return; }
       busy = true;
@@ -188,9 +210,10 @@ export function openEditor(p: Profile | null): void {
       if (d.fp) patch.fingerprint = d.fp;
       else if (!creating && p!.fingerprint?.enabled) patch.fingerprint = { ...p!.fingerprint, enabled: false };
       const name = d.name.trim();
+      const cookies = d.cookies.trim() || undefined;
       const r = creating
-        ? await run(api.invoke<Profile>('mgr:create', { name, kind: d.kind, patch, proxy }))
-        : await run(api.invoke<Profile>('mgr:update', p!.id, { ...patch, name: name || p!.name, proxy }));
+        ? await run(api.invoke<Profile>('mgr:create', { name, kind: d.kind, patch, proxy, cookies }))
+        : await run(api.invoke<Profile>('mgr:update', p!.id, { ...patch, name: name || p!.name, proxy, cookies }));
       busy = false;
       save.disabled = false;
       if (!r) return;
@@ -286,6 +309,144 @@ function general(b: HTMLElement, d: Draft, creating: boolean, p: Profile | null,
   // Proxy
   if (d.kind === 'tor') b.append(section(t('ui.col.proxy'), h('p', { class: 'info', text: t('net.torNotHere') })));
   else b.append(section(t('ui.col.proxy'), proxyEditor(d.proxy, p, summary)));
+
+  // Cookies (Dolphin-like: paste an export or load a file; applied at the next start / immediately when running)
+  b.append(section(t('cookies.title'), cookieEditor(d, p)));
+}
+
+function cookieEditor(d: Draft, p: Profile | null): HTMLElement {
+  const status = h('div', { class: 'ck-status', 'aria-live': 'polite' });
+  const ta = h('textarea', { class: 'mono ck-text', rows: '4', spellcheck: 'false', placeholder: t('cookies.ph'), 'aria-label': t('cookies.title') });
+  ta.value = d.cookies;
+  let timer = 0;
+  const check = () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(async () => {
+      clear(status);
+      status.className = 'ck-status';
+      if (!d.cookies.trim()) return;
+      const r = await api.invoke<{ ok: boolean; count: number; skipped: number; format: string; error?: string }>('mgr:parse-cookies', d.cookies).catch(() => null);
+      if (!r) return;
+      status.classList.add(r.ok ? 'ok' : 'bad');
+      status.append(icon(r.ok ? 'check' : 'alert', 14), h('span', {
+        text: r.ok
+          ? `${t('cookies.found', { n: r.count, format: r.format === 'json' ? 'JSON' : 'Netscape' })}${r.skipped ? ` · ${t('cookies.skipped', { n: r.skipped })}` : ''} · ${t(p?.running ? 'cookies.whenNow' : 'cookies.whenStart')}`
+          : r.error ?? '',
+      }));
+    }, 250);
+  };
+  ta.oninput = () => { d.cookies = ta.value; check(); };
+  const file = h('input', { type: 'file', accept: '.json,.txt,.cookies,application/json,text/plain', class: 'hidden' }) as HTMLInputElement;
+  file.onchange = async () => {
+    const f = file.files?.[0];
+    if (!f) return;
+    if (f.size > 8 * 1024 * 1024) { toast(t('cookies.err.tooBig'), 'err'); return; }
+    d.cookies = await f.text();
+    ta.value = d.cookies;
+    file.value = '';
+    check();
+  };
+  const load = h('button', { type: 'button', class: 'btn small' }, icon('file', 14), h('span', { text: t('cookies.load') }));
+  load.onclick = () => file.click();
+  const clr = h('button', { type: 'button', class: 'btn small' }, icon('close', 14), h('span', { text: t('cookies.clear') }));
+  clr.onclick = () => { d.cookies = ''; ta.value = ''; check(); };
+  check();
+  return h('div', { class: 'ck-ed' },
+    ta,
+    h('div', { class: 'row' }, load, clr, file, h('div', { class: 'grow' }), status),
+    p?.pendingCookies ? h('p', { class: 'hint' }, icon('clock', 13), ` ${t('cookies.pending')}`) : null,
+    h('p', { class: 'hint', text: t('cookies.hint') }));
+}
+
+// ------------------------------------------------------------------ Mass import
+
+interface MassDraft { text: string; os: FpOs | 'random'; type: ProxyType; prefix: string }
+interface MassLine { n: number; name: string; proxy: string; error?: string }
+const MASS_MAX = 500;
+const MASS_OSES: FpOs[] = ['windows11', 'windows10', 'macos', 'linux'];
+
+/** One line = one profile: "name;proxy", "name" or just "proxy" (any format the proxy field accepts). */
+function massLines(m: MassDraft): MassLine[] {
+  const out: MassLine[] = [];
+  const lines = m.text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  const prefix = m.prefix.trim() || t('profile.defaultName');
+  lines.slice(0, MASS_MAX).forEach((line, i) => {
+    const sep = line.search(/[;\t]/);
+    let name = '';
+    let proxy = '';
+    if (sep >= 0) { name = line.slice(0, sep).trim(); proxy = line.slice(sep + 1).trim(); }
+    else if (parseProxy(line, m.type).ok) proxy = line;
+    else name = line;
+    const l: MassLine = { n: i + 1, name: (name || `${prefix} ${i + 1}`).slice(0, 64), proxy };
+    if (proxy) { const r = parseProxy(proxy, m.type); if (!r.ok) l.error = t(r.error ?? 'proxy.err.format'); }
+    out.push(l);
+  });
+  return out;
+}
+
+function massImport(b: HTMLElement, m: MassDraft, d: Draft, changed: () => void): void {
+  const preview = h('div', { class: 'mass-prev' });
+  const drawPreview = () => {
+    clear(preview);
+    const lines = massLines(m);
+    changed();
+    if (!lines.length) { preview.append(h('p', { class: 'hint', text: t('mass.empty') })); return; }
+    const bad = lines.filter((l) => l.error).length;
+    preview.append(h('div', { class: 'mass-sum' },
+      h('span', { class: 'pill ok', text: t('mass.okN', { n: lines.length - bad }) }),
+      bad ? h('span', { class: 'pill bad', text: t('mass.badN', { n: bad }) }) : null,
+      m.text.split(/\n/).filter((x) => x.trim()).length > MASS_MAX ? h('span', { class: 'pill warn', text: t('mass.limit', { n: MASS_MAX }) }) : null));
+    const tbl = h('div', { class: 'mass-rows', role: 'list' });
+    for (const l of lines.slice(0, 200)) {
+      tbl.append(h('div', { class: `mass-row${l.error ? ' bad' : ''}`, role: 'listitem' },
+        h('span', { class: 'mr-n', text: String(l.n) }),
+        h('span', { class: 'mr-name', text: l.name }),
+        h('span', { class: 'mr-proxy mono', text: l.error ?? (l.proxy ? l.proxy.replace(/(:[^:@/]*)@/, ':•••@') : t('proxy.none')) })));
+    }
+    preview.append(tbl);
+  };
+  const ta = h('textarea', { class: 'mono mass-text', rows: '8', spellcheck: 'false', placeholder: 'Sklep 1;http://user:pass@1.2.3.4:8080\nSklep 2;socks5://5.6.7.8:1080\n9.9.9.9:3128:login:haslo', 'aria-label': t('mass.tab') });
+  ta.value = m.text;
+  ta.oninput = () => { m.text = ta.value; drawPreview(); };
+  const file = h('input', { type: 'file', accept: '.txt,.csv,text/plain', class: 'hidden' }) as HTMLInputElement;
+  file.onchange = async () => { const f = file.files?.[0]; if (!f) return; m.text = (await f.text()).slice(0, 1_000_000); ta.value = m.text; file.value = ''; drawPreview(); };
+  const load = h('button', { type: 'button', class: 'btn small' }, icon('file', 14), h('span', { text: t('mass.load') }));
+  load.onclick = () => file.click();
+  const prefix = input(m.prefix, { maxlength: '40', placeholder: t('profile.defaultName') }, (v) => { m.prefix = v; drawPreview(); });
+
+  b.append(
+    section(t('mass.title'), h('p', { class: 'hint', text: t('mass.intro') }), ta, h('div', { class: 'row' }, load, file)),
+    section(t('mass.options'),
+      frow(t('fp.os'), seg<FpOs | 'random'>(m.os, [...MASS_OSES.map((o) => [o, osLabel(o), o.startsWith('windows') ? 'windows' : o === 'macos' ? 'apple' : 'linux'] as [FpOs, string, string]), ['random', t('mass.osRandom'), 'shuffle']], (v) => { m.os = v; })),
+      frow(t('proxy.type'), seg<ProxyType>(m.type, [['http', 'HTTP'], ['https', 'HTTPS'], ['socks4', 'SOCKS4'], ['socks5', 'SOCKS5']], (v) => { m.type = v; drawPreview(); })),
+      frow(t('mass.prefix'), prefix),
+      frow(t('ui.tags'), tagInput(d.tags, (v) => { d.tags = v; }, [...new Set(S.profiles.flatMap((x) => x.tags ?? []))])),
+      h('p', { class: 'hint', text: t('mass.each') })),
+    section(t('mass.preview'), preview));
+  drawPreview();
+}
+
+async function runMassImport(m: MassDraft, d: Draft, progress: (done: number, total: number) => void): Promise<{ created: number; errors: string[] }> {
+  const lines = massLines(m).filter((l) => !l.error);
+  const errors: string[] = [];
+  let created = 0;
+  for (const [i, l] of lines.entries()) {
+    progress(i, lines.length);
+    try {
+      const os = m.os === 'random' ? MASS_OSES[Math.floor(Math.random() * MASS_OSES.length)] : m.os;
+      const fingerprint = await api.invoke<Fingerprint>('mgr:fingerprint-new', os);
+      await api.invoke<Profile>('mgr:create', {
+        name: l.name, kind: 'antidetect',
+        patch: { fingerprint, tags: d.tags, folder: d.folder.trim() },
+        proxy: l.proxy ? { mode: 'new', text: l.proxy, type: m.type, changeIpUrl: '', name: '', save: false } : { mode: 'none' },
+      });
+      created++;
+    } catch (e) {
+      errors.push(`${l.n}: ${errText(e)}`);
+    }
+  }
+  progress(lines.length, lines.length);
+  return { created, errors };
 }
 
 /** Proxy block styled like the reference: No / New / Saved, type chips, input with check, change-IP URL, name. */
@@ -545,10 +706,10 @@ function advanced(b: HTMLElement, d: Draft, draw: () => void, summary: () => voi
   hw.append(frow(t('fp.geolocation'), seg(fp.geolocation.mode, [['auto', t('fp.v.autoIp')], ['manual', t('fp.v.manual')], ['block', t('fp.v.block')]], (v) => { fp.geolocation.mode = v; const c = d.proxy.check; if (v === 'manual' && !fp.geolocation.latitude && !fp.geolocation.longitude && c?.ok && c.latitude !== undefined && c.longitude !== undefined) { fp.geolocation.latitude = c.latitude; fp.geolocation.longitude = c.longitude; draw(); return; } geo.classList.toggle('hidden', v !== 'manual'); ch(); }), geo));
 
   // Device
-  const cores = select<string>(String(fp.cpu.cores), CORES.map((c) => [String(c), t('fp.coresN', { n: c })] as [string, string]), (v) => { fp.cpu.cores = Number(v); ch(); });
+  const cores = h('div', { class: 'row nowrap chips-unit' }, seg<string>(String(fp.cpu.cores), (CORES.includes(fp.cpu.cores) ? CORES : [...CORES, fp.cpu.cores].sort((a, b) => a - b)).map((c) => [String(c), String(c)] as [string, string]), (v) => { fp.cpu.cores = Number(v); ch(); }), h('span', { class: 'unit', text: t('fp.cores') }));
   cores.classList.toggle('hidden', fp.cpu.mode !== 'manual');
   hw.append(frow(t('fp.cpu'), seg(fp.cpu.mode, [['real', t('fp.v.real')], ['manual', t('fp.v.manual')]], (v) => { fp.cpu.mode = v; cores.classList.toggle('hidden', v !== 'manual'); ch(); }), cores));
-  const mem = select<string>(String(fp.memory.gb), MEMORY.map((m) => [String(m), `${m} GB`] as [string, string]), (v) => { fp.memory.gb = Number(v); ch(); });
+  const mem = h('div', { class: 'row nowrap chips-unit' }, seg<string>(String(fp.memory.gb), (MEMORY.includes(fp.memory.gb) ? MEMORY : [...MEMORY, fp.memory.gb].sort((a, b) => a - b)).map((m) => [String(m), String(m)] as [string, string]), (v) => { fp.memory.gb = Number(v); ch(); }), h('span', { class: 'unit', text: 'GB' }));
   mem.classList.toggle('hidden', fp.memory.mode !== 'manual');
   hw.append(frow(t('fp.memory'), seg(fp.memory.mode, [['real', t('fp.v.real')], ['manual', t('fp.v.manual')]], (v) => { fp.memory.mode = v; mem.classList.toggle('hidden', v !== 'manual'); ch(); }), mem, h('p', { class: 'hint', text: t('fp.memoryHint') })));
   const screens = SCREENS[fp.os === 'macos' ? 'mac' : 'desktop'];
